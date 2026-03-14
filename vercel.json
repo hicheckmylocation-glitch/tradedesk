@@ -1,5 +1,14 @@
 {
   "rewrites": [
+    { "source": "/api/quotes", "destination": "/api/quotes" },
+    { "source": "/api/history", "destination": "/api/history" },
+    { "source": "/api/stocks", "destination": "/api/stocks" },
     { "source": "/(.*)", "destination": "/public/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/public/(.*)",
+      "headers": [{"key": "Content-Type", "value": "text/html"}]
+    }
   ]
 }
