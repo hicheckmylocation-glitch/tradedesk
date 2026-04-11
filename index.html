@@ -321,7 +321,14 @@ function generateInitialHistory(stock) {
   return candles;
 }
 
+function isMarketOpen(){
+  const now=new Date();
+  const mins=now.getHours()*60+now.getMinutes();
+  return (mins>=555&&mins<=930)&&(now.getDay()>=1&&now.getDay()<=5);
+}
+
 function tickPrices(){
+  if(!isMarketOpen()) return;
   STOCKS.forEach(s=>{
     const move = (Math.random()-0.501)*0.003;
     s.price = parseFloat((s.price*(1+move)).toFixed(2));
