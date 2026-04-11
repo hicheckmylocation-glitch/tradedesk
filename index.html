@@ -128,6 +128,25 @@ canvas#macdChart{display:block;cursor:crosshair;border-top:1px solid var(--borde
 .notif-success{background:#00d4aa22;border:1px solid var(--green);color:var(--green)}
 .notif-error{background:#ff475722;border:1px solid var(--red);color:var(--red)}
 .empty-state{text-align:center;padding:40px;color:var(--muted)}
+
+/* Strategy Panel */
+#strategy-panel{position:fixed;right:0;top:50%;transform:translateY(-50%);width:220px;background:var(--panel);border:1px solid var(--border);border-right:none;border-radius:6px 0 0 6px;padding:12px;z-index:500;font-size:11px}
+#strategy-panel h3{color:var(--accent);font-size:11px;letter-spacing:1px;margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+.sig-box{padding:10px;border-radius:4px;margin-bottom:8px;text-align:center}
+.sig-buy{background:#00d4aa22;border:1px solid var(--green)}
+.sig-sell{background:#ff475722;border:1px solid var(--red)}
+.sig-none{background:#1e2d4522;border:1px solid var(--border)}
+.sig-label{font-size:16px;font-weight:bold;letter-spacing:2px}
+.sig-reason{font-size:9px;color:var(--muted);margin-top:4px}
+.strat-row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #0d1420}
+.strat-row label{color:var(--muted)}
+.strat-row span{font-weight:bold}
+.auto-trade-toggle{width:100%;padding:6px;margin-top:8px;border-radius:3px;border:none;cursor:pointer;font-family:inherit;font-size:11px;font-weight:bold}
+.auto-on{background:#00d4aa33;color:var(--green);border:1px solid var(--green)}
+.auto-off{background:#ff475733;color:var(--red);border:1px solid var(--red)}
+.strat-log{max-height:100px;overflow-y:auto;margin-top:8px;font-size:9px;color:var(--muted)}
+.strat-log div{padding:2px 0;border-bottom:1px solid #0d1420}
+
 </style>
 </head>
 <body>
@@ -1013,6 +1032,24 @@ STOCKS.forEach(s=>s.history=generateInitialHistory(s));
 setInterval(()=>{ if(!isMarketOpen()) tickPrices(); }, 5000);
 setInterval(updateMarketStatus,60000);
 </script>
+
+<div id="strategy-panel">
+  <h3>⚡ STRATEGY SIGNALS</h3>
+  <div class="sig-box sig-none" id="sig-box">
+    <div class="sig-label" id="sig-label">SCANNING...</div>
+    <div class="sig-reason" id="sig-reason">Waiting for data</div>
+  </div>
+  <div class="strat-row"><label>EMA20</label><span id="s-ema20">-</span></div>
+  <div class="strat-row"><label>EMA50</label><span id="s-ema50">-</span></div>
+  <div class="strat-row"><label>VWAP</label><span id="s-vwap">-</span></div>
+  <div class="strat-row"><label>Pivot</label><span id="s-pivot">-</span></div>
+  <div class="strat-row"><label>SL</label><span id="s-sl" class="down">-</span></div>
+  <div class="strat-row"><label>Target</label><span id="s-tgt" class="up">-</span></div>
+  <div class="strat-row"><label>EMAs Clear</label><span id="s-clear">-</span></div>
+  <button class="auto-trade-toggle auto-on" id="auto-btn" onclick="toggleAutoTrade()">🤖 AUTO TRADE: ON</button>
+  <div class="strat-log" id="strat-log"></div>
+</div>
+
 </body>
 </html>
 
