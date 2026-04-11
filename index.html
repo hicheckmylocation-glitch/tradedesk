@@ -1009,7 +1009,8 @@ renderTicker();
 updateMarketStatus();
 updateBalanceDisplay();
 STOCKS.forEach(s=>s.history=generateInitialHistory(s));
-setInterval(tickPrices,3000);
+// tickPrices runs only when market is closed for UI animation
+setInterval(()=>{ if(!isMarketOpen()) tickPrices(); }, 5000);
 setInterval(updateMarketStatus,60000);
 </script>
 </body>
