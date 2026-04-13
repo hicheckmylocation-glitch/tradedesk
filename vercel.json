@@ -1,7 +1,5 @@
 {
   "rewrites": [
-    { "source": "/api/quotes", "destination": "/api/quotes" },
-    { "source": "/api/history", "destination": "/api/history" },
-    { "source": "/(.*)", "destination": "/index.html" }
+    { "source": "/(.*)", "destination": "/public/index.html" }
   ]
 }
