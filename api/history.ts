@@ -1,6 +1,6 @@
 ﻿const https = require("https");
 
-const SYM_MAP = { "NIFTY":"^NSEI","BANKNIFTY":"^NSEBANK","FINNIFTY":"^NSEFIN","MIDCPNIFTY":"^NSEI" };
+const SYM_MAP = { "NIFTY":"^NSEI","BANKNIFTY":"^NSEBANK","FINNIFTY":"^CNXFIN" };
 
 function get(url) {
   return new Promise((resolve, reject) => {

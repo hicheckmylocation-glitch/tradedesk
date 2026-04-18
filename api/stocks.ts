@@ -4,7 +4,6 @@ module.exports = (req, res) => {
     {symbol:"NIFTY",name:"Nifty 50 Index",sector:"Index"},
     {symbol:"BANKNIFTY",name:"Bank Nifty Index",sector:"Index"},
     {symbol:"FINNIFTY",name:"Nifty Financial Services",sector:"Index"},
-    {symbol:"MIDCPNIFTY",name:"Nifty Midcap Select",sector:"Index"},
     {symbol:"RELIANCE",name:"Reliance Industries",sector:"Energy"},
     {symbol:"TCS",name:"Tata Consultancy Services",sector:"IT"},
     {symbol:"HDFCBANK",name:"HDFC Bank",sector:"Banking"},
