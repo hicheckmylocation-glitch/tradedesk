@@ -848,7 +848,7 @@ function drawChart() {
   chartState._visCandles = candles;
 
   // Canvas sizing
-  const totalH = wrap.clientHeight || 500;
+  const totalH = wrap.clientHeight > 50 ? wrap.clientHeight : (chartState.chartH - 120) || 500;
   const volH = chartState.indicators.vol ? 65 : 0;
   const rsiH = chartState.indicators.rsi ? 85 : 0;
   const mainH = totalH - volH - rsiH;
@@ -1148,7 +1148,7 @@ function setupChartInteraction() {
 
 function setupChartResize() {
   const handle = document.getElementById('chart-resize-handle'); if(!handle) return;
-  let dragging=false, startY=0, startH=0;
+  let dragging=false, startY=0, startH=0, rafId=null;
   handle.addEventListener('mousedown', e => {
     dragging=true;
     startY=e.clientY;
@@ -1163,7 +1163,9 @@ function setupChartResize() {
     chartState.chartH = newH;
     const outer = document.getElementById('chart-outer-wrap');
     if(outer) outer.style.height = newH + 'px';
-    drawChart();
+    // Wait for browser reflow before reading clientHeight in drawChart
+    if(rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(() => { rafId=null; drawChart(); });
   });
   window.addEventListener('mouseup', () => {
     if(!dragging) return;
