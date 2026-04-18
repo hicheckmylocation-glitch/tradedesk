@@ -18,9 +18,14 @@ module.exports = async (req, res) => {
   const symbol = req.query.symbol || "RELIANCE";
   const interval = req.query.interval || "5m";
   const range = req.query.range || "5d";
+  const period1 = req.query.period1 ? parseInt(req.query.period1) : null;
+  const period2 = req.query.period2 ? parseInt(req.query.period2) : null;
   const ySym = SYM_MAP[symbol] || (symbol + ".NS");
+  const timeParam = (period1 && period2)
+    ? `period1=${period1}&period2=${period2}`
+    : `range=${range}`;
   try {
-    const data = await get(`https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=${interval}&range=${range}&includePrePost=false`);
+    const data = await get(`https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=${interval}&${timeParam}&includePrePost=false`);
     const result = data?.chart?.result?.[0];
     if (!result) return res.status(404).json({ error: "No data" });
     const ts = result.timestamp || [];
