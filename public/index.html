@@ -890,7 +890,7 @@ function drawChart() {
   [ema20,ema50,ema100,ema200,vwap].forEach(arr => arr.filter(Boolean).forEach(v=>allPrices.push(v)));
   if(chartState.indicators.bb){ bb.upper.filter(Boolean).forEach(v=>allPrices.push(v)); bb.lower.filter(Boolean).forEach(v=>allPrices.push(v)); }
   // Pivots calculated from visible candles — NOT added to allPrices to avoid distorting scale
-  const pivotData = chartState.indicators.pivots ? calcPivots(candles) : null;
+  const pivotSessions = chartState.indicators.pivots ? calcPivots(candles) : [];
   const pMin = Math.min(...allPrices)*0.9985;
   const pMax = Math.max(...allPrices)*1.0015;
   const pRange = pMax-pMin||1;
@@ -952,35 +952,25 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
-  // Pivot Points — TradingView style: lines start at current session open, labels on right
-  if(pivotData) {
-    const startX = px(pivotData.startIdx);
-    const endX = W - PAD.right;
-    if(startX < endX) {
-      const pl = [
-        {v:pivotData.R3, c:'#c62828', l:'R3'},
-        {v:pivotData.R2, c:'#ef5350', l:'R2'},
-        {v:pivotData.R1, c:'#ef9a9a', l:'R1'},
-        {v:pivotData.P,  c:'#fff176', l:'P'},
-        {v:pivotData.S1, c:'#80cbc4', l:'S1'},
-        {v:pivotData.S2, c:'#26a69a', l:'S2'},
-        {v:pivotData.S3, c:'#00695c', l:'S3'},
-      ];
-      pl.forEach(({v,c,l}) => {
+  // Pivot Points — Kite style: per-session lines spanning only within each day
+  if(pivotSessions.length > 0) {
+    pivotSessions.forEach(({levels, startIdx, endIdx}) => {
+      const startX = px(startIdx);
+      const endX   = Math.min(px(endIdx) + candleW, W - PAD.right);
+      if(startX >= endX) return;
+      levels.forEach(({v,c,l}) => {
         const y = py(v);
         if(y < PAD.top || y > PAD.top + chartH) return;
-        ctx.setLineDash([5,4]); ctx.strokeStyle=c; ctx.lineWidth=1;
+        ctx.setLineDash([4,3]); ctx.strokeStyle = c; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(startX, y); ctx.lineTo(endX, y); ctx.stroke();
         ctx.setLineDash([]);
-        // Label just before session-start vertical marker
-        ctx.font='bold 9px JetBrains Mono'; ctx.fillStyle=c; ctx.textAlign='right';
-        ctx.fillText(l, startX - 4, y + 3);
+        // Label at the start of the session line, above the line
+        ctx.font = 'bold 8px JetBrains Mono';
+        ctx.fillStyle = c;
+        ctx.textAlign = 'left';
+        ctx.fillText(l, startX + 3, y - 2);
       });
-      // Vertical marker at session start
-      ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1; ctx.setLineDash([2,3]);
-      ctx.beginPath(); ctx.moveTo(startX, PAD.top); ctx.lineTo(startX, PAD.top+chartH); ctx.stroke();
-      ctx.setLineDash([]);
-    }
+    });
   }
 
   // Candles
@@ -1093,27 +1083,43 @@ function updateChartLegend(ema20,ema50,ema100,ema200,vwap){
 }
 
 // ── PIVOT POINTS (Traditional) ──────────────────────────────────────────
-// Pivots operate on the VISIBLE candle slice so they track what's on screen.
-// Returns pivot levels + the index of the current session's first visible candle.
+// calcPivots: returns array of sessions, each with levels + start/end candle indices
+// Kite-style: every visible session gets its own pivot lines from its own previous day's H/L/C
 function calcPivots(candles) {
-  if(!candles || candles.length < 2) return null;
+  if(!candles || candles.length < 2) return [];
+  // Group candles by day
   const dayMap = {};
   candles.forEach((c, i) => {
     const key = new Date(c.time).toDateString();
-    if(!dayMap[key]) dayMap[key] = { list: [], firstIdx: i };
+    if(!dayMap[key]) dayMap[key] = { list: [], firstIdx: i, lastIdx: i };
     dayMap[key].list.push(c);
+    dayMap[key].lastIdx = i;
   });
   const days = Object.keys(dayMap).sort((a,b) => new Date(a) - new Date(b));
-  if(days.length < 2) return null; // need at least 2 different days visible
-  const prevDay = days[days.length - 2];
-  const currDay = days[days.length - 1];
-  const prevList = dayMap[prevDay].list;
-  const currStartIdx = dayMap[currDay].firstIdx;
-  const H = Math.max(...prevList.map(c=>c.high));
-  const L = Math.min(...prevList.map(c=>c.low));
-  const C = prevList[prevList.length-1].close;
-  const P = (H+L+C)/3;
-  return { P, R1:2*P-L, R2:P+(H-L), R3:H+2*(P-L), S1:2*P-H, S2:P-(H-L), S3:L-2*(H-P), startIdx: currStartIdx };
+  if(days.length < 2) return [];
+  const sessions = [];
+  for(let d = 1; d < days.length; d++) {
+    const prevList = dayMap[days[d-1]].list;
+    const currDay  = dayMap[days[d]];
+    const H = Math.max(...prevList.map(c=>c.high));
+    const L = Math.min(...prevList.map(c=>c.low));
+    const C = prevList[prevList.length-1].close;
+    const P = (H+L+C)/3;
+    sessions.push({
+      levels: [
+        {v: H+2*(P-L),   c:'#c62828', l:'R3'},
+        {v: P+(H-L),     c:'#ef5350', l:'R2'},
+        {v: 2*P-L,       c:'#ef9a9a', l:'R1'},
+        {v: P,           c:'#fff176', l:'P'},
+        {v: 2*P-H,       c:'#80cbc4', l:'S1'},
+        {v: P-(H-L),     c:'#26a69a', l:'S2'},
+        {v: L-2*(H-P),   c:'#4db6ac', l:'S3'},
+      ],
+      startIdx: currDay.firstIdx,
+      endIdx:   currDay.lastIdx,
+    });
+  }
+  return sessions;
 }
 
 // ── VWAP CALCULATION ──────────────────────────────────────────────────────
