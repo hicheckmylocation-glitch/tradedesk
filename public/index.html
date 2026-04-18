@@ -586,7 +586,7 @@ const chartState = {
 };
 
 // Candle counts per timeframe
-const TF_CANDLES = { '1m':60, '5m':75, '10m':60, '15m':48, '30m':30, '1h':24 };
+const TF_CANDLES = { '1m':80, '5m':50, '10m':40, '15m':30, '30m':20, '1h':15 };
 const TF_LABEL = { '1m':'1 MIN', '5m':'5 MIN', '10m':'10 MIN', '15m':'15 MIN', '30m':'30 MIN', '1h':'1 HR' };
 
 function renderChartTab() {
@@ -897,7 +897,7 @@ function drawChart() {
 
   const px = i => PAD.left + (i/(candles.length-1||1))*chartW;
   const py = v => PAD.top + (1-(v-pMin)/pRange)*chartH;
-  const candleW = Math.max(1.5, Math.min(18, (chartW/candles.length)*0.75));
+  const candleW = Math.max(3, Math.min(24, (chartW/candles.length)*0.75));
 
   // Save snapshot for crosshair
   chartState._snap = {candles, PAD, W, mainH, chartH, pMin, pMax, pRange, px, py, candleW, ema20, ema50, ema100, ema200, vwap, rsiVals};
@@ -992,7 +992,7 @@ function drawChart() {
     const bodyTop=py(Math.max(c.open,c.close));
     const bodyBot=py(Math.min(c.open,c.close));
     const bodyH=Math.max(1,bodyBot-bodyTop);
-    ctx.strokeStyle=col; ctx.lineWidth=Math.max(1,candleW*0.12);
+    ctx.strokeStyle=col; ctx.lineWidth=1;
     ctx.beginPath(); ctx.moveTo(x,py(c.high)); ctx.lineTo(x,bodyTop); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x,bodyBot); ctx.lineTo(x,py(c.low)); ctx.stroke();
     ctx.fillStyle=col; ctx.fillRect(x-candleW/2,bodyTop,candleW,bodyH);
