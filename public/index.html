@@ -1467,7 +1467,7 @@ function checkMarket(){
 // ── STRATEGY SIGNAL (fixes missing function called from drawChart) ──────────
 function updateStrategySignal(sym, candles, ema20, ema50, ema100, ema200, vwap) {
   const lastVal = arr => { if(!arr) return null; for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return arr[i]; return null; };
-  const e20=lastVal(ema20), e50=lastVal(ema50);
+  const e20=lastVal(ema20), e50=lastVal(ema50), e100=lastVal(ema100), e200=lastVal(ema200);
   if(!e20||!e50) return;
   // find second-to-last valid values for crossover detection
   let p20=null, p50=null, found;
@@ -1481,12 +1481,18 @@ function updateStrategySignal(sym, candles, ema20, ema50, ema100, ema200, vwap) 
   }
   const el = document.getElementById('strategy-signal');
   if(!el) return;
+  // EMA100/200 alignment check
+  const aligned100_200 = e100&&e200 ? e100>e200 : null;
+  const alignedBull = aligned100_200===true, alignedBear = aligned100_200===false;
   let txt, color;
-  if(p20!==null&&p50!==null&&p20<=p50&&e20>e50)      { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSSOVER \u2014 BUY SIGNAL'; color='#00e676'; }
-  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50)  { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSSOVER \u2014 SELL SIGNAL'; color='#ff4444'; }
+  if(p20!==null&&p50!==null&&p20<=p50&&e20>e50&&alignedBull)      { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSSOVER \u2014 CONFIRMED BUY'; color='#00e676'; }
+  else if(p20!==null&&p50!==null&&p20<=p50&&e20>e50&&!alignedBull) { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSS \u2014 SKIPPED (EMA100<EMA200)'; color='#ff9800'; }
+  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50&&alignedBear)  { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSSOVER \u2014 CONFIRMED SELL'; color='#ff4444'; }
+  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50&&!alignedBear) { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSS \u2014 SKIPPED (EMA100>EMA200)'; color='#ff9800'; }
   else if(e20>e50) { txt='\u25b2 EMA20 > EMA50 \u2014 Uptrend'; color='#00e676'; }
   else             { txt='\u25bc EMA20 < EMA50 \u2014 Downtrend'; color='#ef5350'; }
-  el.innerHTML = `<span style="color:${color};font-weight:700;">${txt}</span><span style="color:var(--muted);margin-left:12px;">EMA20: \u20b9${fn(e20)} &nbsp; EMA50: \u20b9${fn(e50)}</span>`;
+  const alignTxt = e100&&e200 ? `&nbsp;&nbsp;EMA100: \u20b9${fn(e100)} &nbsp; EMA200: \u20b9${fn(e200)} &nbsp; <span style="color:${alignedBull?'#00e676':alignedBear?'#ff4444':'#ff9800'};">[${alignedBull?'\u2191 Bullish':alignedBear?'\u2193 Bearish':'\u2015 Mixed'}]</span>` : '';
+  el.innerHTML = `<span style="color:${color};font-weight:700;">${txt}</span><span style="color:var(--muted);margin-left:12px;">EMA20: \u20b9${fn(e20)} &nbsp; EMA50: \u20b9${fn(e50)}${alignTxt}</span>`;
 }
 
 // ── AUTO SCANNER ─────────────────────────────────────────────────────────────
@@ -1549,6 +1555,11 @@ function runScanner() {
     if(!e20||!e50||!p20||!p50) return;
     const bullCross=p20<=p50&&e20>e50, bearCross=p20>=p50&&e20<e50;
     if(!bullCross&&!bearCross) return;
+    // EMA100 & EMA200 must be aligned in same direction (confirmation filter)
+    const e100=_ema(closes,100), e200=_ema(closes,200);
+    const emaAlignedBull = !e100||!e200 || e100>e200;  // if not enough data, don't block
+    const emaAlignedBear = !e100||!e200 || e100<e200;
+    const confirmed = bullCross ? emaAlignedBull : emaAlignedBear;
     const dir=bullCross?'BUY':'SELL';
     const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}`;
     if(state.scannerTraded[key]) return;
@@ -1559,20 +1570,23 @@ function runScanner() {
     const riskPer=Math.abs(entry-slPrice); if(riskPer<=0) return;
     const qty=Math.max(1,Math.floor(state.scannerRisk/riskPer));
     const target=bullCross?entry+riskPer:entry-riskPer;
+    const emaNote = e100&&e200 ? ` | EMA100${e100>e200?'>':'<'}EMA200` : '';
     const sig={
       id:Date.now()+Math.random(), sym:s.symbol, dir,
       entry:parseFloat(entry.toFixed(2)), sl:parseFloat(slPrice.toFixed(2)),
       target:parseFloat(target.toFixed(2)), qty, rr:'1:1',
       time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
-      status:'SIGNAL', pnl:null
+      status:'SIGNAL', pnl:null, confirmed
     };
-    if(bullCross) {
+    if(!confirmed) {
+      sig.status=`SKIPPED (EMA100${e100&&e200?(e100>e200?'>':'<'):'?'}EMA200 against)`;
+    } else if(bullCross) {
       const total=entry*qty;
       if(total<=state.cash){
         state.cash-=total;
         addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target});
         addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,
-          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191 SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
+          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191${emaNote} SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
         sig.status='EXECUTED';
         notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
         updateHeader(); save();
@@ -1683,8 +1697,9 @@ function renderScanner() {
           </div>
         </div>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.8;background:var(--bg3);padding:10px 14px;border-radius:4px;">
-          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), SL at 5-candle low, Target at 1:1 RR<br>
-          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 \u2192 Shown in log, no short in paper mode<br>
+          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 <b>AND EMA100 &gt; EMA200</b> \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), SL at 5-candle low, Target at 1:1 RR<br>
+          <b style="color:var(--amber2);">\u26a0 FILTERED:</b> EMA20\u00d7EMA50 crossover detected but EMA100/200 against direction \u2192 logged as SKIPPED, no trade<br>
+          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 with EMA100 &lt; EMA200 \u2192 Shown in log, no short in paper mode<br>
           <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target
         </div>
       </div>
