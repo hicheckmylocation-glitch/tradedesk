@@ -866,12 +866,16 @@ function drawChart() {
     if(rc){ rc.width=W; rc.height=rsiH; rc.style.height=rsiH+'px'; }
   }
 
-  // Indicators
+  // Indicators — use warmup buffer so EMA100/200 never go null when panning
   const closes = candles.map(c=>c.close);
-  const ema20 = calcEMA(closes, 20);
-  const ema50 = calcEMA(closes, 50);
-  const ema100 = calcEMA(closes, 100);
-  const ema200 = calcEMA(closes, 200);
+  const WARMUP = 250;
+  const warmupCandles = allCandles.slice(Math.max(0, startIdx - WARMUP), endIdx);
+  const warmupCloses = warmupCandles.map(c=>c.close);
+  const wOff = warmupCandles.length - candles.length;
+  const ema20  = calcEMA(warmupCloses, 20).slice(wOff);
+  const ema50  = calcEMA(warmupCloses, 50).slice(wOff);
+  const ema100 = calcEMA(warmupCloses, 100).slice(wOff);
+  const ema200 = calcEMA(warmupCloses, 200).slice(wOff);
   const vwap = calcVWAP(candles);
   const bb = calcBB(closes, 20, 2);
   const rsiVals = calcRSI(closes, 14);
@@ -885,8 +889,8 @@ function drawChart() {
   const allPrices = candles.flatMap(c=>[c.high,c.low]);
   [ema20,ema50,ema100,ema200,vwap].forEach(arr => arr.filter(Boolean).forEach(v=>allPrices.push(v)));
   if(chartState.indicators.bb){ bb.upper.filter(Boolean).forEach(v=>allPrices.push(v)); bb.lower.filter(Boolean).forEach(v=>allPrices.push(v)); }
-  const pivotData = chartState.indicators.pivots ? calcPivots(chartState._candles) : null;
-  if(pivotData) Object.values(pivotData).forEach(v=>allPrices.push(v));
+  // Pivots calculated from visible candles — NOT added to allPrices to avoid distorting scale
+  const pivotData = chartState.indicators.pivots ? calcPivots(candles) : null;
   const pMin = Math.min(...allPrices)*0.9985;
   const pMax = Math.max(...allPrices)*1.0015;
   const pRange = pMax-pMin||1;
@@ -948,26 +952,35 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
-  // Pivot Points
+  // Pivot Points — TradingView style: lines start at current session open, labels on right
   if(pivotData) {
-    const pl = [
-      {v:pivotData.P,  c:'#fff176', l:'P'},
-      {v:pivotData.R1, c:'#ef9a9a', l:'R1'},
-      {v:pivotData.R2, c:'#ef5350', l:'R2'},
-      {v:pivotData.R3, c:'#b71c1c', l:'R3'},
-      {v:pivotData.S1, c:'#80cbc4', l:'S1'},
-      {v:pivotData.S2, c:'#26a69a', l:'S2'},
-      {v:pivotData.S3, c:'#00695c', l:'S3'},
-    ];
-    pl.forEach(({v,c,l}) => {
-      const y=py(v);
-      if(y < PAD.top || y > PAD.top+chartH) return;
-      ctx.setLineDash([5,4]); ctx.strokeStyle=c; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(W-PAD.right,y); ctx.stroke();
+    const startX = px(pivotData.startIdx);
+    const endX = W - PAD.right;
+    if(startX < endX) {
+      const pl = [
+        {v:pivotData.R3, c:'#c62828', l:'R3'},
+        {v:pivotData.R2, c:'#ef5350', l:'R2'},
+        {v:pivotData.R1, c:'#ef9a9a', l:'R1'},
+        {v:pivotData.P,  c:'#fff176', l:'P'},
+        {v:pivotData.S1, c:'#80cbc4', l:'S1'},
+        {v:pivotData.S2, c:'#26a69a', l:'S2'},
+        {v:pivotData.S3, c:'#00695c', l:'S3'},
+      ];
+      pl.forEach(({v,c,l}) => {
+        const y = py(v);
+        if(y < PAD.top || y > PAD.top + chartH) return;
+        ctx.setLineDash([5,4]); ctx.strokeStyle=c; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(startX, y); ctx.lineTo(endX, y); ctx.stroke();
+        ctx.setLineDash([]);
+        // Label just before session-start vertical marker
+        ctx.font='bold 9px JetBrains Mono'; ctx.fillStyle=c; ctx.textAlign='right';
+        ctx.fillText(l, startX - 4, y + 3);
+      });
+      // Vertical marker at session start
+      ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1; ctx.setLineDash([2,3]);
+      ctx.beginPath(); ctx.moveTo(startX, PAD.top); ctx.lineTo(startX, PAD.top+chartH); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.font='bold 9px JetBrains Mono'; ctx.fillStyle=c; ctx.textAlign='left';
-      ctx.fillText(l, PAD.left+4, y-3);
-    });
+    }
   }
 
   // Candles
@@ -1080,27 +1093,27 @@ function updateChartLegend(ema20,ema50,ema100,ema200,vwap){
 }
 
 // ── PIVOT POINTS (Traditional) ──────────────────────────────────────────
-function calcPivots(allCandles) {
-  if(!allCandles || allCandles.length < 2) return null;
+// Pivots operate on the VISIBLE candle slice so they track what's on screen.
+// Returns pivot levels + the index of the current session's first visible candle.
+function calcPivots(candles) {
+  if(!candles || candles.length < 2) return null;
   const dayMap = {};
-  allCandles.forEach(c => {
+  candles.forEach((c, i) => {
     const key = new Date(c.time).toDateString();
-    if(!dayMap[key]) dayMap[key] = [];
-    dayMap[key].push(c);
+    if(!dayMap[key]) dayMap[key] = { list: [], firstIdx: i };
+    dayMap[key].list.push(c);
   });
-  const days = Object.keys(dayMap).sort((a,b) => new Date(a)-new Date(b));
-  let prevCandles;
-  if(days.length >= 2) {
-    prevCandles = dayMap[days[days.length-2]];
-  } else {
-    const half = Math.floor(allCandles.length/2);
-    prevCandles = allCandles.slice(0, half);
-  }
-  const H = Math.max(...prevCandles.map(c=>c.high));
-  const L = Math.min(...prevCandles.map(c=>c.low));
-  const C = prevCandles[prevCandles.length-1].close;
+  const days = Object.keys(dayMap).sort((a,b) => new Date(a) - new Date(b));
+  if(days.length < 2) return null; // need at least 2 different days visible
+  const prevDay = days[days.length - 2];
+  const currDay = days[days.length - 1];
+  const prevList = dayMap[prevDay].list;
+  const currStartIdx = dayMap[currDay].firstIdx;
+  const H = Math.max(...prevList.map(c=>c.high));
+  const L = Math.min(...prevList.map(c=>c.low));
+  const C = prevList[prevList.length-1].close;
   const P = (H+L+C)/3;
-  return { P, R1:2*P-L, R2:P+(H-L), R3:H+2*(P-L), S1:2*P-H, S2:P-(H-L), S3:L-2*(H-P) };
+  return { P, R1:2*P-L, R2:P+(H-L), R3:H+2*(P-L), S1:2*P-H, S2:P-(H-L), S3:L-2*(H-P), startIdx: currStartIdx };
 }
 
 // ── VWAP CALCULATION ──────────────────────────────────────────────────────
