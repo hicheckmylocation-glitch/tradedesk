@@ -584,6 +584,7 @@ const chartState = {
   _chartSnapshot: null,
   chartH: 520,
   priceScale: 1.0,
+  priceOffset: 0,
 };
 
 // Candle counts per timeframe
@@ -697,6 +698,7 @@ async function fetchAndDrawChart(sym) {
   chartState._loadingMore = false;
   chartState.panOffset = 0;
   chartState.priceScale = 1.0;
+  chartState.priceOffset = 0;
   drawChart();
 }
 
@@ -895,8 +897,8 @@ function drawChart() {
   const pivotSessions = chartState.indicators.pivots ? calcPivots(candles) : [];
   let pMin0 = Math.min(...allPrices)*0.9985;
   let pMax0 = Math.max(...allPrices)*1.0015;
-  // Apply vertical price scale (drag Y-axis to adjust)
-  const pMid = (pMax0 + pMin0) / 2;
+  // Apply vertical price scale + offset (drag Y-axis to scale, drag chart to pan vertically)
+  const pMid = (pMax0 + pMin0) / 2 + chartState.priceOffset;
   const pHalf = (pMax0 - pMin0) / 2 / Math.max(0.1, chartState.priceScale);
   const pMin = pMid - pHalf;
   const pMax = pMid + pHalf;
@@ -1143,7 +1145,7 @@ function calcVWAP(candles) {
 // ── CROSSHAIR + INTERACTION ───────────────────────────────────────────────
 function setupChartInteraction() {
   const wrap = document.getElementById('chart-canvas-wrap'); if(!wrap) return;
-  let dragging=false, dragStartX=0, dragStartPan=0;
+  let dragging=false, dragStartX=0, dragStartY=0, dragStartPan=0, dragStartOffset=0;
   let yAxisDrag=false, yDragStartY=0, yDragStartScale=1;
 
   wrap.addEventListener('mousedown', e => {
@@ -1156,7 +1158,8 @@ function setupChartInteraction() {
       wrap.style.cursor='ns-resize';
       e.preventDefault();
     } else {
-      dragging=true; dragStartX=e.clientX; dragStartPan=chartState.panOffset;
+      dragging=true; dragStartX=e.clientX; dragStartY=e.clientY;
+      dragStartPan=chartState.panOffset; dragStartOffset=chartState.priceOffset;
       wrap.style.cursor='grabbing';
     }
   });
@@ -1174,6 +1177,13 @@ function setupChartInteraction() {
       if(!canvas) return;
       const cw=(canvas.width-70)/Math.max(1,chartState._visibleCandles||50);
       chartState.panOffset=Math.max(0,Math.round(dragStartPan-(dragStartX-e.clientX)/cw));
+      // Vertical drag → shift price view up/down
+      const sn = chartState._snap;
+      if(sn && sn.pRange) {
+        const pxPerPrice = sn.chartH / sn.pRange;
+        const dy = e.clientY - dragStartY;
+        chartState.priceOffset = dragStartOffset + dy / pxPerPrice;
+      }
       drawChart();
     } else {
       // Change cursor when hovering over Y-axis
@@ -1211,6 +1221,7 @@ function setupChartInteraction() {
     const mx = e.clientX - rect.left;
     if(mx >= rect.width - 70) {
       chartState.priceScale = 1.0;
+      chartState.priceOffset = 0;
       drawChart();
     }
   });
