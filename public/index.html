@@ -583,6 +583,7 @@ const chartState = {
   _visibleCandles: 60,
   _chartSnapshot: null,
   chartH: 520,
+  priceScale: 1.0,
 };
 
 // Candle counts per timeframe
@@ -695,6 +696,7 @@ async function fetchAndDrawChart(sym) {
   chartState._noMoreHistory = false;
   chartState._loadingMore = false;
   chartState.panOffset = 0;
+  chartState.priceScale = 1.0;
   drawChart();
 }
 
@@ -891,8 +893,13 @@ function drawChart() {
   if(chartState.indicators.bb){ bb.upper.filter(Boolean).forEach(v=>allPrices.push(v)); bb.lower.filter(Boolean).forEach(v=>allPrices.push(v)); }
   // Pivots calculated from visible candles — NOT added to allPrices to avoid distorting scale
   const pivotSessions = chartState.indicators.pivots ? calcPivots(candles) : [];
-  const pMin = Math.min(...allPrices)*0.9985;
-  const pMax = Math.max(...allPrices)*1.0015;
+  let pMin0 = Math.min(...allPrices)*0.9985;
+  let pMax0 = Math.max(...allPrices)*1.0015;
+  // Apply vertical price scale (drag Y-axis to adjust)
+  const pMid = (pMax0 + pMin0) / 2;
+  const pHalf = (pMax0 - pMin0) / 2 / Math.max(0.1, chartState.priceScale);
+  const pMin = pMid - pHalf;
+  const pMax = pMid + pHalf;
   const pRange = pMax-pMin||1;
 
   const px = i => PAD.left + (i/(candles.length-1||1))*chartW;
@@ -1137,31 +1144,75 @@ function calcVWAP(candles) {
 function setupChartInteraction() {
   const wrap = document.getElementById('chart-canvas-wrap'); if(!wrap) return;
   let dragging=false, dragStartX=0, dragStartPan=0;
+  let yAxisDrag=false, yDragStartY=0, yDragStartScale=1;
 
   wrap.addEventListener('mousedown', e => {
-    dragging=true; dragStartX=e.clientX; dragStartPan=chartState.panOffset;
-    wrap.style.cursor='grabbing';
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const wrapW = rect.width;
+    // If click is on right 70px (price axis area) → Y-axis scale drag
+    if(mx >= wrapW - 70) {
+      yAxisDrag=true; yDragStartY=e.clientY; yDragStartScale=chartState.priceScale;
+      wrap.style.cursor='ns-resize';
+      e.preventDefault();
+    } else {
+      dragging=true; dragStartX=e.clientX; dragStartPan=chartState.panOffset;
+      wrap.style.cursor='grabbing';
+    }
   });
-  window.addEventListener('mouseup', () => { dragging=false; if(wrap) wrap.style.cursor='crosshair'; });
+  window.addEventListener('mouseup', () => {
+    dragging=false; yAxisDrag=false;
+    if(wrap) wrap.style.cursor='crosshair';
+  });
   wrap.addEventListener('mousemove', e => {
-    if(dragging){
+    if(yAxisDrag) {
+      const delta = yDragStartY - e.clientY; // drag up = zoom in
+      chartState.priceScale = Math.max(0.1, Math.min(10, yDragStartScale * Math.pow(1.005, delta)));
+      drawChart();
+    } else if(dragging){
       const canvas=document.getElementById('mainChart');
       if(!canvas) return;
       const cw=(canvas.width-70)/Math.max(1,chartState._visibleCandles||50);
       chartState.panOffset=Math.max(0,Math.round(dragStartPan-(dragStartX-e.clientX)/cw));
       drawChart();
     } else {
+      // Change cursor when hovering over Y-axis
+      const rect = wrap.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      if(mx >= rect.width - 70) {
+        wrap.style.cursor='ns-resize';
+      } else {
+        wrap.style.cursor='crosshair';
+      }
       showCrosshair(e, wrap);
     }
   });
   wrap.addEventListener('wheel', e => {
     e.preventDefault();
-    chartState.zoom = e.deltaY<0 ? Math.min(chartState.zoom*1.15,6) : Math.max(chartState.zoom/1.15,0.2);
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    if(mx >= rect.width - 70) {
+      // Scroll on Y-axis → vertical price scale
+      chartState.priceScale = e.deltaY<0
+        ? Math.min(chartState.priceScale*1.12,10)
+        : Math.max(chartState.priceScale/1.12,0.1);
+    } else {
+      chartState.zoom = e.deltaY<0 ? Math.min(chartState.zoom*1.15,6) : Math.max(chartState.zoom/1.15,0.2);
+    }
     drawChart();
   }, {passive:false});
   wrap.addEventListener('mouseleave', () => {
     const tt=document.getElementById('ct-tooltip'); if(tt) tt.style.display='none';
     drawChart();
+  });
+  // Double-click on Y-axis resets price scale
+  wrap.addEventListener('dblclick', e => {
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    if(mx >= rect.width - 70) {
+      chartState.priceScale = 1.0;
+      drawChart();
+    }
   });
 }
 
