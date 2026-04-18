@@ -582,6 +582,7 @@ const chartState = {
   panOffset: 0,
   _visibleCandles: 60,
   _chartSnapshot: null,
+  chartH: 520,
 };
 
 // Candle counts per timeframe
@@ -598,7 +599,7 @@ function renderChartTab() {
   const tf = chartState.timeframe;
 
   document.getElementById('content').innerHTML = `
-    <div style="display:flex;height:calc(100vh - 160px);min-height:500px;gap:0;">
+    <div id="chart-outer-wrap" style="display:flex;height:${chartState.chartH}px;min-height:340px;gap:0;position:relative;">
       <!-- CHART AREA -->
       <div style="flex:1;display:flex;flex-direction:column;background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden;">
         <!-- Toolbar -->
@@ -644,10 +645,19 @@ function renderChartTab() {
         <div id="strategy-signal" style="padding:5px 14px;font-size:11px;background:var(--bg3);border-top:1px solid var(--border);min-height:22px;"></div>
         <div class="chart-legend" id="chart-legend"></div>
       </div>
+      <!-- Resize handle bottom-right corner -->
+      <div id="chart-resize-handle" title="Drag to resize chart" style="position:absolute;bottom:0;right:0;width:28px;height:28px;cursor:ns-resize;display:flex;align-items:center;justify-content:center;z-index:20;border-radius:0 0 6px 0;background:rgba(255,255,255,0.04);border-top:1px solid var(--border);border-left:1px solid var(--border);">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <line x1="2" y1="4" x2="10" y2="4" stroke="#5a6580" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="2" y1="7" x2="10" y2="7" stroke="#5a6580" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="2" y1="10" x2="10" y2="10" stroke="#5a6580" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </div>
     </div>`;
 
   fetchAndDrawChart(sym);
   setupChartInteraction();
+  setupChartResize();
 }
 
 // ── FETCH REAL DATA FROM YAHOO FINANCE VIA CORS PROXY ─────────────────────
@@ -1075,6 +1085,33 @@ function setupChartInteraction() {
   wrap.addEventListener('mouseleave', () => {
     const tt=document.getElementById('ct-tooltip'); if(tt) tt.style.display='none';
     drawChart();
+  });
+}
+
+function setupChartResize() {
+  const handle = document.getElementById('chart-resize-handle'); if(!handle) return;
+  let dragging=false, startY=0, startH=0;
+  handle.addEventListener('mousedown', e => {
+    dragging=true;
+    startY=e.clientY;
+    startH=chartState.chartH;
+    e.preventDefault(); e.stopPropagation();
+    document.body.style.cursor='ns-resize';
+    document.body.style.userSelect='none';
+  });
+  window.addEventListener('mousemove', e => {
+    if(!dragging) return;
+    const newH = Math.max(300, Math.min(1200, startH + (e.clientY - startY)));
+    chartState.chartH = newH;
+    const outer = document.getElementById('chart-outer-wrap');
+    if(outer) outer.style.height = newH + 'px';
+    drawChart();
+  });
+  window.addEventListener('mouseup', () => {
+    if(!dragging) return;
+    dragging=false;
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
   });
 }
 
