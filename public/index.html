@@ -182,6 +182,16 @@ canvas{width:100%;height:100px;}
 .legend-dot{width:8px;height:8px;border-radius:50%;}
 .ohlc-bar{display:flex;gap:16px;padding:6px 14px;font-size:11px;background:var(--bg3);border-top:1px solid var(--border);}
 .ohlc-item span:first-child{color:var(--muted);margin-right:4px;}
+/* ── AUTO SCANNER ── */
+.scanner-toggle-btn{padding:14px 32px;border-radius:8px;font-family:inherit;font-size:16px;font-weight:800;cursor:pointer;letter-spacing:2px;transition:all .2s;min-width:160px;}
+.scanner-toggle-btn.on{border:2px solid #00e676;background:rgba(0,230,118,0.15);color:#00e676;}
+.scanner-toggle-btn.off{border:2px solid var(--border);background:var(--bg3);color:var(--muted);}
+.sig-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700;}
+.sig-executed{background:rgba(0,230,118,0.15);color:#00e676;}
+.sig-target{background:rgba(0,230,118,0.2);color:#00e676;}
+.sig-sl{background:rgba(255,68,68,0.2);color:#ff4444;}
+.sig-signal{background:rgba(245,166,35,0.15);color:var(--amber);}
+.sig-skipped{background:rgba(120,120,120,0.15);color:var(--muted);}
 </style>
 </head>
 <body>
@@ -226,6 +236,7 @@ canvas{width:100%;height:100px;}
       <button class="tab-btn" onclick="setTab('options',this)">F&O Options</button>
       <button class="tab-btn" onclick="setTab('portfolio',this)">Portfolio <span class="tab-badge" id="badge-portfolio">0</span></button>
       <button class="tab-btn" onclick="setTab('orders',this)">Orders <span class="tab-badge" id="badge-orders">0</span></button>
+      <button class="tab-btn" onclick="setTab('scanner',this)">🤖 Auto Scan</button>
     </div>
     <div id="content">
       <div class="placeholder"><div class="placeholder-big">← Select a stock to begin</div><div>90+ NSE stocks available</div></div>
@@ -249,6 +260,10 @@ let state = {
   strikeCenter: null,
   strikeCenterSym: null,
   nextId: 1,
+  scannerOn: false,
+  scannerRisk: 5000,
+  scannerLog: [],
+  scannerTraded: {},
 };
 
 try {
@@ -258,6 +273,10 @@ try {
     state.portfolio = saved.portfolio || {};
     state.orders = saved.orders || [];
     state.nextId = saved.nextId || 1;
+    state.scannerOn = saved.scannerOn || false;
+    state.scannerRisk = saved.scannerRisk || 5000;
+    state.scannerLog = saved.scannerLog || [];
+    state.scannerTraded = saved.scannerTraded || {};
   }
 } catch(e) {}
 
@@ -265,6 +284,8 @@ function save() {
   localStorage.setItem('td_state', JSON.stringify({
     cash: state.cash, portfolio: state.portfolio,
     orders: state.orders, nextId: state.nextId,
+    scannerOn: state.scannerOn, scannerRisk: state.scannerRisk,
+    scannerLog: state.scannerLog, scannerTraded: state.scannerTraded,
   }));
 }
 
@@ -357,6 +378,7 @@ async function refreshPrices() {
     updateHeader();
     if(state.selected && state.tab === 'market') renderMarket();
     if(state.tab === 'portfolio') renderPortfolio();
+    runScanner();
   } catch(e) {
     console.error('refreshPrices failed:', e);
   }
@@ -437,6 +459,7 @@ function setTab(tab, btn) {
 function renderContent() {
   if(state.tab==='portfolio'){renderPortfolio();return;}
   if(state.tab==='orders'){renderOrders();return;}
+  if(state.tab==='scanner'){renderScanner();return;}
   if(!state.selected){
     document.getElementById('content').innerHTML=`<div class="placeholder"><div class="placeholder-big">← Select a stock to trade</div><div>90+ NSE stocks available</div></div>`;
     return;
@@ -617,6 +640,7 @@ function renderChartTab() {
           ${chartState.indicators.rsi?'<canvas id="rsiChart" style="display:block;width:100%;border-top:1px solid var(--border);"></canvas>':''}
           <div id="ct-tooltip" style="display:none;position:absolute;background:rgba(16,18,26,0.95);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:11px;pointer-events:none;z-index:10;min-width:160px;"></div>
         </div>
+        <div id="strategy-signal" style="padding:5px 14px;font-size:11px;background:var(--bg3);border-top:1px solid var(--border);min-height:22px;"></div>
         <div class="chart-legend" id="chart-legend"></div>
       </div>
     </div>`;
@@ -1438,6 +1462,276 @@ function checkMarket(){
   const el=document.getElementById('market-status');
   el.textContent=open?'● NSE OPEN':'● NSE CLOSED';
   el.className='market-badge '+(open?'market-open':'market-closed');
+}
+
+// ── STRATEGY SIGNAL (fixes missing function called from drawChart) ──────────
+function updateStrategySignal(sym, candles, ema20, ema50, ema100, ema200, vwap) {
+  const lastVal = arr => { if(!arr) return null; for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return arr[i]; return null; };
+  const e20=lastVal(ema20), e50=lastVal(ema50);
+  if(!e20||!e50) return;
+  // find second-to-last valid values for crossover detection
+  let p20=null, p50=null, found;
+  found=false; for(let i=ema20.length-1;i>=0;i--){ if(ema20[i]!=null){if(!found)found=true;else{p20=ema20[i];break;}} }
+  found=false; for(let i=ema50.length-1;i>=0;i--){ if(ema50[i]!=null){if(!found)found=true;else{p50=ema50[i];break;}} }
+  // prime scan history with real candle closes when chart is viewed
+  if(state.stocks[sym] && candles && candles.length > 0) {
+    const closes = candles.map(c=>c.close).filter(Boolean);
+    if(closes.length > ((state.stocks[sym].scanHistory)||[]).length)
+      state.stocks[sym].scanHistory = closes;
+  }
+  const el = document.getElementById('strategy-signal');
+  if(!el) return;
+  let txt, color;
+  if(p20!==null&&p50!==null&&p20<=p50&&e20>e50)      { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSSOVER \u2014 BUY SIGNAL'; color='#00e676'; }
+  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50)  { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSSOVER \u2014 SELL SIGNAL'; color='#ff4444'; }
+  else if(e20>e50) { txt='\u25b2 EMA20 > EMA50 \u2014 Uptrend'; color='#00e676'; }
+  else             { txt='\u25bc EMA20 < EMA50 \u2014 Downtrend'; color='#ef5350'; }
+  el.innerHTML = `<span style="color:${color};font-weight:700;">${txt}</span><span style="color:var(--muted);margin-left:12px;">EMA20: \u20b9${fn(e20)} &nbsp; EMA50: \u20b9${fn(e50)}</span>`;
+}
+
+// ── AUTO SCANNER ─────────────────────────────────────────────────────────────
+function _ema(closes, period) {
+  if(!closes||closes.length<period) return null;
+  const k=2/(period+1);
+  let v=closes.slice(0,period).reduce((a,b)=>a+b,0)/period;
+  for(let i=period;i<closes.length;i++) v=closes[i]*k+v*(1-k);
+  return v;
+}
+function _prevEma(closes, period) {
+  if(!closes||closes.length<period+1) return null;
+  return _ema(closes.slice(0,-1), period);
+}
+
+async function primeScanner() {
+  const syms = Object.keys(state.stocks);
+  let done = 0;
+  for(let i=0;i<syms.length;i+=3) {
+    const batch = syms.slice(i,i+3);
+    await Promise.all(batch.map(async sym=>{
+      try {
+        const r=await fetch(`/api/history?symbol=${sym}&interval=5m&range=5d`);
+        if(!r.ok) return;
+        const data=await r.json();
+        if(data.candles&&data.candles.length>10)
+          state.stocks[sym].scanHistory=data.candles.map(c=>c.close).filter(Boolean);
+      } catch(e){}
+      done++;
+    }));
+    await new Promise(res=>setTimeout(res,150));
+    if(state.tab==='scanner') renderScanner();
+  }
+}
+
+function runScanner() {
+  if(!state.scannerOn) return;
+  // Check SL / Target exits on open auto positions
+  Object.entries(state.portfolio).forEach(([id,h])=>{
+    if(!h.sl||!h.target) return;
+    const curr=state.stocks[h.symbol]?.price; if(!curr||curr<=0) return;
+    const hitSL=curr<=h.sl, hitTarget=curr>=h.target;
+    if(!hitSL&&!hitTarget) return;
+    const pnl=(curr-h.avgPrice)*h.qty;
+    state.cash+=curr*h.qty;
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total:curr*h.qty,
+      desc:`\ud83e\udd16 AUTO EXIT (${hitTarget?'TARGET HIT':'SL HIT'}) P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`});
+    const sig=state.scannerLog.find(s=>s.sym===h.symbol&&s.status==='EXECUTED');
+    if(sig){sig.status=hitTarget?'\u2705 TARGET':'\u274c SL HIT';sig.pnl=pnl;}
+    delete state.portfolio[id];
+    notify(`\ud83e\udd16 AUTO EXIT ${h.symbol} \u2014 ${hitTarget?'\u2705 TARGET HIT':'\u274c SL HIT'} | P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`, hitTarget?'success':'error');
+    updateHeader(); save(); updateBadges();
+  });
+  // Scan for new crossovers
+  Object.values(state.stocks).forEach(s=>{
+    const closes=s.scanHistory;
+    if(!closes||closes.length<55) return;
+    const e20=_ema(closes,20), e50=_ema(closes,50);
+    const p20=_prevEma(closes,20), p50=_prevEma(closes,50);
+    if(!e20||!e50||!p20||!p50) return;
+    const bullCross=p20<=p50&&e20>e50, bearCross=p20>=p50&&e20<e50;
+    if(!bullCross&&!bearCross) return;
+    const dir=bullCross?'BUY':'SELL';
+    const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}`;
+    if(state.scannerTraded[key]) return;
+    state.scannerTraded[key]=true;
+    const entry=s.price||closes[closes.length-1]; if(!entry||entry<=0) return;
+    const recent=closes.slice(-5);
+    const slPrice=bullCross?Math.min(...recent)*0.9995:Math.max(...recent)*1.0005;
+    const riskPer=Math.abs(entry-slPrice); if(riskPer<=0) return;
+    const qty=Math.max(1,Math.floor(state.scannerRisk/riskPer));
+    const target=bullCross?entry+riskPer:entry-riskPer;
+    const sig={
+      id:Date.now()+Math.random(), sym:s.symbol, dir,
+      entry:parseFloat(entry.toFixed(2)), sl:parseFloat(slPrice.toFixed(2)),
+      target:parseFloat(target.toFixed(2)), qty, rr:'1:1',
+      time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
+      status:'SIGNAL', pnl:null
+    };
+    if(bullCross) {
+      const total=entry*qty;
+      if(total<=state.cash){
+        state.cash-=total;
+        addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target});
+        addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,
+          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191 SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
+        sig.status='EXECUTED';
+        notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
+        updateHeader(); save();
+      } else { sig.status='SKIPPED (low cash)'; }
+    }
+    state.scannerLog.unshift(sig);
+    if(state.scannerLog.length>50) state.scannerLog.pop();
+    save();
+  });
+  if(state.tab==='scanner') renderScanner();
+}
+
+function toggleScanner() {
+  state.scannerOn=!state.scannerOn; save();
+  if(state.scannerOn){
+    Object.keys(state.stocks).forEach(sym=>{ if(!state.stocks[sym].scanHistory) state.stocks[sym].scanHistory=[]; });
+    notify('\ud83e\udd16 Auto Scanner ON — fetching 5m candle data...','success');
+    primeScanner().then(()=>{
+      notify('\ud83e\udd16 Scanner ready — watching for EMA20\u00d7EMA50 crossovers','success');
+      if(state.tab==='scanner') renderScanner();
+    });
+  } else { notify('Auto Scanner OFF','error'); }
+  renderScanner();
+}
+
+function renderScanner() {
+  if(state.tab!=='scanner') return;
+  const primedCount=Object.values(state.stocks).filter(s=>s.scanHistory&&s.scanHistory.length>=55).length;
+  const totalStocks=Object.keys(state.stocks).length;
+  const executed=state.scannerLog.filter(s=>s.status==='EXECUTED').length;
+  const wins=state.scannerLog.filter(s=>s.status&&s.status.includes('TARGET')).length;
+  const losses=state.scannerLog.filter(s=>s.status&&s.status.includes('SL')).length;
+  const activeTrades=Object.values(state.portfolio).filter(h=>h.type==='EQUITY'&&h.sl).length;
+
+  const activeRows=Object.entries(state.portfolio).filter(([,h])=>h.type==='EQUITY'&&h.sl).map(([id,h])=>{
+    const curr=state.stocks[h.symbol]?.price||h.avgPrice;
+    const pnl=(curr-h.avgPrice)*h.qty;
+    const progress=h.target!==h.sl?Math.min(100,Math.max(0,((curr-h.avgPrice)/(h.target-h.avgPrice))*100)):0;
+    return `<tr style="border-top:1px solid var(--border);">
+      <td style="padding:8px;font-weight:700;color:var(--amber);cursor:pointer;" onclick="selectStock('${h.symbol}')">${h.symbol}</td>
+      <td style="padding:8px;text-align:center;">\u20b9${fn(h.avgPrice)}</td>
+      <td style="padding:8px;text-align:center;color:#ff4444;">\u20b9${fn(h.sl)}</td>
+      <td style="padding:8px;text-align:center;color:#00e676;">\u20b9${fn(h.target)}</td>
+      <td style="padding:8px;text-align:center;">\u20b9${fn(curr)}</td>
+      <td style="padding:8px;text-align:center;color:${pnl>=0?'#00e676':'#ff4444'};font-weight:700;">${pnl>=0?'+':''}\u20b9${fn(pnl)}</td>
+      <td style="padding:8px;text-align:center;">
+        <div style="background:var(--border);border-radius:4px;height:6px;width:80px;display:inline-block;vertical-align:middle;">
+          <div style="background:${pnl>=0?'#00e676':'#ff4444'};height:6px;border-radius:4px;width:${Math.abs(progress)}%;"></div>
+        </div>
+      </td>
+      <td style="padding:8px;text-align:center;"><button onclick="quickSell('${id}')" style="background:#ff4444;color:white;border:none;padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px;font-weight:700;">EXIT</button></td>
+    </tr>`;
+  }).join('');
+
+  const logRows=state.scannerLog.map(sig=>{
+    const cls=sig.status==='EXECUTED'?'sig-executed':sig.status.includes('TARGET')?'sig-target':sig.status.includes('SL')?'sig-sl':sig.status.includes('SKIPPED')?'sig-skipped':'sig-signal';
+    return `<tr style="border-top:1px solid var(--border);">
+      <td style="padding:8px;color:var(--muted);font-size:10px;">${sig.time}</td>
+      <td style="padding:8px;font-weight:700;color:var(--amber);cursor:pointer;" onclick="selectStock('${sig.sym}')">${sig.sym}</td>
+      <td style="padding:8px;text-align:center;color:${sig.dir==='BUY'?'#00e676':'#ff4444'};font-weight:700;">${sig.dir==='BUY'?'\u25b2 BUY':'\u25bc SELL'}</td>
+      <td style="padding:8px;text-align:center;">\u20b9${fn(sig.entry)}</td>
+      <td style="padding:8px;text-align:center;color:#ff4444;">\u20b9${fn(sig.sl)}</td>
+      <td style="padding:8px;text-align:center;color:#00e676;">\u20b9${fn(sig.target)}</td>
+      <td style="padding:8px;text-align:center;">${sig.qty}</td>
+      <td style="padding:8px;text-align:center;"><span class="sig-badge ${cls}">${sig.status}</span></td>
+      <td style="padding:8px;text-align:center;color:${sig.pnl==null?'var(--muted)':sig.pnl>=0?'#00e676':'#ff4444'};font-weight:700;">${sig.pnl==null?'\u2014':(sig.pnl>=0?'+':'')+'\u20b9'+fn(sig.pnl)}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('content').innerHTML=`
+    <div>
+      <!-- Title + Toggle -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+        <div>
+          <div style="font-family:'Syne',sans-serif;font-size:22px;font-weight:800;color:var(--amber);">\ud83e\udd16 AUTO SCANNER</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px;">EMA 20 \u00d7 EMA 50 Crossover &nbsp;\u00b7&nbsp; 1:1 Risk:Reward &nbsp;\u00b7&nbsp; Auto BUY execution &nbsp;\u00b7&nbsp; Auto SL/Target exit</div>
+        </div>
+        <button class="scanner-toggle-btn ${state.scannerOn?'on':'off'}" onclick="toggleScanner()">
+          ${state.scannerOn?'\u2b24 SCANNER ON':'\u25cb SCANNER OFF'}
+        </button>
+      </div>
+
+      <!-- Stats -->
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px;">
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Status</div><div class="stat-val" style="color:${state.scannerOn?'#00e676':'var(--muted)'};">${state.scannerOn?'\u25cf LIVE':'\u25cb OFF'}</div></div>
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Primed Stocks</div><div class="stat-val">${primedCount}<span style="color:var(--muted);font-size:11px;"> / ${totalStocks}</span></div></div>
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Signals</div><div class="stat-val" style="color:var(--amber);">${state.scannerLog.length}</div></div>
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Wins / Losses</div><div class="stat-val"><span style="color:#00e676;">${wins}</span> / <span style="color:#ff4444;">${losses}</span></div></div>
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Open Positions</div><div class="stat-val" style="color:var(--amber);">${activeTrades}</div></div>
+      </div>
+
+      <!-- Config -->
+      <div class="trade-panel" style="margin-bottom:20px;">
+        <div class="trade-title">Strategy Settings</div>
+        <div style="display:grid;grid-template-columns:180px 1fr 1fr;gap:16px;align-items:end;">
+          <div class="form-group">
+            <div class="form-label">Risk Per Trade (\u20b9)</div>
+            <input class="form-input" type="number" id="scanner-risk" value="${state.scannerRisk}" min="500" step="500"
+              onchange="state.scannerRisk=parseFloat(this.value)||5000;save()"/>
+          </div>
+          <div class="form-group">
+            <div class="form-label">Entry Signal</div>
+            <input class="form-input" value="EMA20 crosses above EMA50 on 5m chart" readonly style="color:var(--amber);"/>
+          </div>
+          <div class="form-group">
+            <div class="form-label">SL / Target</div>
+            <input class="form-input" value="SL = recent 5-candle low &nbsp;|\u00a0Target = Entry + (Entry \u2212 SL)" readonly style="color:#00e676;"/>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.8;background:var(--bg3);padding:10px 14px;border-radius:4px;">
+          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), SL at 5-candle low, Target at 1:1 RR<br>
+          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 \u2192 Shown in log, no short in paper mode<br>
+          <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target
+        </div>
+      </div>
+
+      <!-- Active positions -->
+      ${activeTrades>0?`
+      <div class="trade-panel" style="margin-bottom:20px;border-color:rgba(0,230,118,0.3);">
+        <div class="trade-title" style="color:#00e676;">\u26a1 ACTIVE AUTO POSITIONS (${activeTrades})</div>
+        <div style="overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;">
+              <th style="padding:8px;text-align:left;">Symbol</th><th style="padding:8px;">Entry</th>
+              <th style="padding:8px;color:#ff4444;">Stop Loss</th><th style="padding:8px;color:#00e676;">Target</th>
+              <th style="padding:8px;">LTP</th><th style="padding:8px;">P&amp;L</th><th style="padding:8px;">Progress</th><th style="padding:8px;">Action</th>
+            </tr></thead>
+            <tbody>${activeRows}</tbody>
+          </table>
+        </div>
+      </div>`:''}
+
+      <!-- Signal Log -->
+      <div class="trade-panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div class="trade-title" style="margin-bottom:0;">\ud83d\udccb SIGNAL LOG</div>
+          ${state.scannerLog.length>0?`<button onclick="state.scannerLog=[];state.scannerTraded={};save();renderScanner();" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:4px 10px;border-radius:3px;cursor:pointer;font-size:11px;">Clear</button>`:''}
+        </div>
+        ${state.scannerLog.length===0?`
+          <div style="text-align:center;padding:40px;color:var(--muted);">
+            <div style="font-size:36px;margin-bottom:12px;">\ud83d\udce1</div>
+            <div style="font-size:14px;margin-bottom:6px;">${state.scannerOn?'Scanning all '+totalStocks+' stocks for EMA20\u00d7EMA50 crossovers...':'Turn ON scanner to start'}</div>
+            ${state.scannerOn&&primedCount<totalStocks?`<div style="font-size:11px;color:var(--amber);">Priming candle data: ${primedCount}/${totalStocks} stocks ready</div>`:''}
+          </div>
+        `:`
+          <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:12px;">
+              <thead><tr style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;">
+                <th style="padding:8px;text-align:left;">Time</th><th style="padding:8px;text-align:left;">Symbol</th>
+                <th style="padding:8px;">Signal</th><th style="padding:8px;">Entry</th>
+                <th style="padding:8px;color:#ff4444;">SL</th><th style="padding:8px;color:#00e676;">Target</th>
+                <th style="padding:8px;">Qty</th><th style="padding:8px;">Status</th><th style="padding:8px;">P&amp;L</th>
+              </tr></thead>
+              <tbody>${logRows}</tbody>
+            </table>
+          </div>
+        `}
+      </div>
+    </div>`;
 }
 
 // ── START ────────────────────────────────────────────────────────────────────
