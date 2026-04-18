@@ -575,7 +575,7 @@ function drawChart(sym) {
 // CHART ENGINE
 // ══════════════════════════════════════════════════════
 const chartState = {
-  indicators: { ma20:true, ma50:true, bb:false, rsi:false, macd:false, vol:true, ema100:false, ema200:false, vwap:true },
+  indicators: { ma20:true, ma50:true, bb:false, rsi:false, macd:false, vol:true, ema100:false, ema200:false, vwap:true, pivots:true },
   candles: 60,
   timeframe: '5m',
   zoom: 1.0,
@@ -617,6 +617,7 @@ function renderChartTab() {
           <button class="ind-btn bb ${chartState.indicators.vwap?'active':''}" style="color:#e040fb;" onclick="toggleInd('vwap')">VWAP</button>
           <button class="ind-btn vol ${chartState.indicators.vol?'active':''}" onclick="toggleInd('vol')">VOL</button>
           <button class="ind-btn rsi ${chartState.indicators.rsi?'active':''}" onclick="toggleInd('rsi')">RSI</button>
+          <button class="ind-btn" style="color:#fff176;${chartState.indicators.pivots?'background:rgba(255,241,118,0.12);border-color:#fff176':''}" onclick="toggleInd('pivots')">PIVOTS</button>
           <div style="width:1px;height:18px;background:var(--border);margin:0 4px;"></div>
           <button class="ct-btn" onclick="chartState.zoom=Math.min(chartState.zoom*1.25,6);drawChart()">+</button>
           <button class="ct-btn" onclick="chartState.zoom=Math.max(chartState.zoom/1.25,0.2);drawChart()">−</button>
@@ -816,6 +817,8 @@ function drawChart() {
   const allPrices = candles.flatMap(c=>[c.high,c.low]);
   [ema20,ema50,ema100,ema200,vwap].forEach(arr => arr.filter(Boolean).forEach(v=>allPrices.push(v)));
   if(chartState.indicators.bb){ bb.upper.filter(Boolean).forEach(v=>allPrices.push(v)); bb.lower.filter(Boolean).forEach(v=>allPrices.push(v)); }
+  const pivotData = chartState.indicators.pivots ? calcPivots(chartState._candles) : null;
+  if(pivotData) Object.values(pivotData).forEach(v=>allPrices.push(v));
   const pMin = Math.min(...allPrices)*0.9985;
   const pMax = Math.max(...allPrices)*1.0015;
   const pRange = pMax-pMin||1;
@@ -877,6 +880,28 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
+  // Pivot Points
+  if(pivotData) {
+    const pl = [
+      {v:pivotData.P,  c:'#fff176', l:'P'},
+      {v:pivotData.R1, c:'#ef9a9a', l:'R1'},
+      {v:pivotData.R2, c:'#ef5350', l:'R2'},
+      {v:pivotData.R3, c:'#b71c1c', l:'R3'},
+      {v:pivotData.S1, c:'#80cbc4', l:'S1'},
+      {v:pivotData.S2, c:'#26a69a', l:'S2'},
+      {v:pivotData.S3, c:'#00695c', l:'S3'},
+    ];
+    pl.forEach(({v,c,l}) => {
+      const y=py(v);
+      if(y < PAD.top || y > PAD.top+chartH) return;
+      ctx.setLineDash([5,4]); ctx.strokeStyle=c; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(W-PAD.right,y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font='bold 9px JetBrains Mono'; ctx.fillStyle=c; ctx.textAlign='left';
+      ctx.fillText(l, PAD.left+4, y-3);
+    });
+  }
+
   // Candles
   candles.forEach((c,i) => {
     const x=px(i);
@@ -889,8 +914,7 @@ function drawChart() {
     ctx.strokeStyle=col; ctx.lineWidth=Math.max(1,candleW*0.12);
     ctx.beginPath(); ctx.moveTo(x,py(c.high)); ctx.lineTo(x,bodyTop); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(x,bodyBot); ctx.lineTo(x,py(c.low)); ctx.stroke();
-    if(isUp){ ctx.fillStyle=col; ctx.fillRect(x-candleW/2,bodyTop,candleW,bodyH); }
-    else { ctx.fillStyle='rgba(239,83,80,0.15)'; ctx.fillRect(x-candleW/2,bodyTop,candleW,bodyH); ctx.strokeStyle=col; ctx.lineWidth=1; ctx.strokeRect(x-candleW/2,bodyTop,candleW,bodyH); }
+    ctx.fillStyle=col; ctx.fillRect(x-candleW/2,bodyTop,candleW,bodyH);
   });
 
   // Live price line
@@ -987,6 +1011,30 @@ function updateChartLegend(ema20,ema50,ema100,ema200,vwap){
   legend.innerHTML=items.join('');
 }
 
+// ── PIVOT POINTS (Traditional) ──────────────────────────────────────────
+function calcPivots(allCandles) {
+  if(!allCandles || allCandles.length < 2) return null;
+  const dayMap = {};
+  allCandles.forEach(c => {
+    const key = new Date(c.time).toDateString();
+    if(!dayMap[key]) dayMap[key] = [];
+    dayMap[key].push(c);
+  });
+  const days = Object.keys(dayMap).sort((a,b) => new Date(a)-new Date(b));
+  let prevCandles;
+  if(days.length >= 2) {
+    prevCandles = dayMap[days[days.length-2]];
+  } else {
+    const half = Math.floor(allCandles.length/2);
+    prevCandles = allCandles.slice(0, half);
+  }
+  const H = Math.max(...prevCandles.map(c=>c.high));
+  const L = Math.min(...prevCandles.map(c=>c.low));
+  const C = prevCandles[prevCandles.length-1].close;
+  const P = (H+L+C)/3;
+  return { P, R1:2*P-L, R2:P+(H-L), R3:H+2*(P-L), S1:2*P-H, S2:P-(H-L), S3:L-2*(H-P) };
+}
+
 // ── VWAP CALCULATION ──────────────────────────────────────────────────────
 function calcVWAP(candles) {
   let cumTPV = 0, cumVol = 0;
@@ -1013,7 +1061,7 @@ function setupChartInteraction() {
       const canvas=document.getElementById('mainChart');
       if(!canvas) return;
       const cw=(canvas.width-70)/Math.max(1,chartState._visibleCandles||50);
-      chartState.panOffset=Math.max(0,Math.round(dragStartPan+(dragStartX-e.clientX)/cw));
+      chartState.panOffset=Math.max(0,Math.round(dragStartPan-(dragStartX-e.clientX)/cw));
       drawChart();
     } else {
       showCrosshair(e, wrap);
