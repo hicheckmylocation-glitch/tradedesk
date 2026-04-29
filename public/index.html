@@ -264,29 +264,122 @@ let state = {
   scannerRisk: 5000,
   scannerLog: [],
   scannerTraded: {},
+  updatedAt: 0,
 };
 
-try {
-  const saved = JSON.parse(localStorage.getItem('td_state') || '{}');
-  if(saved.cash !== undefined) {
-    state.cash = saved.cash;
-    state.portfolio = saved.portfolio || {};
-    state.orders = saved.orders || [];
-    state.nextId = saved.nextId || 1;
-    state.scannerOn = saved.scannerOn || false;
-    state.scannerRisk = saved.scannerRisk || 5000;
-    state.scannerLog = saved.scannerLog || [];
-    state.scannerTraded = saved.scannerTraded || {};
+const EQUITY_LEVERAGE = 5;
+const LOCAL_STATE_KEY = 'td_state';
+const SHARED_SYNC_MS = 15000;
+let sharedSyncInFlight = false;
+
+function serializeState(updatedAt) {
+  return {
+    cash: state.cash,
+    portfolio: state.portfolio,
+    orders: state.orders,
+    nextId: state.nextId,
+    scannerOn: state.scannerOn,
+    scannerRisk: state.scannerRisk,
+    scannerLog: state.scannerLog,
+    scannerTraded: state.scannerTraded,
+    updatedAt: updatedAt || state.updatedAt || 0,
+  };
+}
+
+function hydrateState(saved) {
+  if (!saved || saved.cash === undefined) return false;
+  state.cash = Number(saved.cash) || 1000000;
+  state.portfolio = saved.portfolio || {};
+  state.orders = Array.isArray(saved.orders) ? saved.orders : [];
+  state.nextId = Number(saved.nextId) || 1;
+  state.scannerOn = Boolean(saved.scannerOn);
+  state.scannerRisk = Number(saved.scannerRisk) || 5000;
+  state.scannerLog = Array.isArray(saved.scannerLog) ? saved.scannerLog : [];
+  state.scannerTraded = saved.scannerTraded || {};
+  state.updatedAt = Number(saved.updatedAt) || state.updatedAt || 0;
+  return true;
+}
+
+function persistLocalState(payload) {
+  try {
+    localStorage.setItem(LOCAL_STATE_KEY, JSON.stringify(payload));
+  } catch (e) {}
+}
+
+function loadLocalState() {
+  try {
+    return JSON.parse(localStorage.getItem(LOCAL_STATE_KEY) || '{}');
+  } catch (e) {
+    return null;
   }
-} catch(e) {}
+}
+
+async function loadSharedState() {
+  try {
+    const res = await fetch('/api/state', { cache: 'no-store' });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function pushSharedState(payload) {
+  try {
+    const res = await fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.status === 409) {
+      const remote = await res.json();
+      if ((remote.updatedAt || 0) > state.updatedAt) {
+        hydrateState(remote);
+        persistLocalState(remote);
+        updateBadges();
+        updateHeader();
+        renderContent();
+      }
+      return;
+    }
+    if (!res.ok) throw new Error('Shared save failed');
+  } catch (e) {}
+}
+
+async function loadState() {
+  hydrateState(loadLocalState());
+  const remote = await loadSharedState();
+  if (remote && (remote.updatedAt || 0) >= (state.updatedAt || 0)) {
+    hydrateState(remote);
+    persistLocalState(remote);
+  }
+}
 
 function save() {
-  localStorage.setItem('td_state', JSON.stringify({
-    cash: state.cash, portfolio: state.portfolio,
-    orders: state.orders, nextId: state.nextId,
-    scannerOn: state.scannerOn, scannerRisk: state.scannerRisk,
-    scannerLog: state.scannerLog, scannerTraded: state.scannerTraded,
-  }));
+  state.updatedAt = Date.now();
+  const payload = serializeState(state.updatedAt);
+  persistLocalState(payload);
+  pushSharedState(payload);
+}
+
+async function syncSharedState(forceRender) {
+  if (sharedSyncInFlight) return;
+  sharedSyncInFlight = true;
+  try {
+    const remote = await loadSharedState();
+    if (remote && (remote.updatedAt || 0) > (state.updatedAt || 0)) {
+      hydrateState(remote);
+      persistLocalState(remote);
+      updateBadges();
+      updateHeader();
+      if (forceRender || state.tab === 'portfolio' || state.tab === 'orders' || state.tab === 'scanner' || state.tab === 'market') {
+        renderContent();
+      }
+      ensureScannerPrimed();
+    }
+  } finally {
+    sharedSyncInFlight = false;
+  }
 }
 
 // ── BLACK-SCHOLES ────────────────────────────────────────────────────────
@@ -386,12 +479,32 @@ async function refreshPrices() {
 
 // Auto refresh every 60 seconds
 async function init() {
+  await loadState();
   await fetchStockList();
+  if (state.selected && !state.stocks[state.selected]) state.selected = null;
+  ensureScannerPrimed();
+  updateBadges();
+  updateHeader();
+  renderContent();
   setInterval(refreshPrices, 60000);
+  setInterval(syncSharedState, SHARED_SYNC_MS);
   checkMarket();
   setInterval(checkMarket, 60000);
+  window.addEventListener('focus', () => syncSharedState(true));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') syncSharedState(true);
+  });
 }
 init();
+
+function ensureScannerPrimed() {
+  if (!state.scannerOn) return;
+  Object.keys(state.stocks).forEach(sym => {
+    if (!state.stocks[sym].scanHistory) state.stocks[sym].scanHistory = [];
+  });
+  const needsPrime = Object.values(state.stocks).some(stock => !stock.scanHistory || stock.scanHistory.length < 55);
+  if (needsPrime) primeScanner();
+}
 
 // ── SECTOR FILTERS ────────────────────────────────────────────────────────
 let currentSector = 'All', searchTerm = '';
@@ -475,7 +588,7 @@ function renderMarket() {
   const s = state.stocks[sym]; if(!s) return;
   const cls = s.changePct > 0 ? 'pos' : s.changePct < 0 ? 'neg' : 'neu';
   const chgStr = `${s.change>=0?'+':''}₹${Math.abs(s.change).toFixed(2)} (${s.changePct>=0?'+':''}${s.changePct.toFixed(2)}%)`;
-  const held = getHolding(sym,'EQUITY');
+  const held = getHoldingSummary(sym,'EQUITY');
 
   document.getElementById('content').innerHTML = `
     <div class="detail-header">
@@ -525,21 +638,89 @@ function renderMarket() {
       <div class="trade-info">
         <div class="trade-info-row"><span>Price</span><span id="ei-price">₹${fn(s.price)}</span></div>
         <div class="trade-info-row"><span>Quantity</span><span id="ei-qty">1</span></div>
+        <div class="trade-info-row"><span>Exposure Value</span><span id="ei-exposure">₹${fn(s.price)}</span></div>
+        <div class="trade-info-row"><span>Leverage</span><span id="ei-lev">${EQUITY_LEVERAGE}x</span></div>
         <div class="trade-info-row"><span>Brokerage (Zerodha flat)</span><span id="ei-brok">₹0.00</span></div>
         <div class="trade-info-row"><span>STT (0.1% on buy)</span><span id="ei-stt">₹0.00</span></div>
         <div class="trade-info-row"><span>Exchange Txn Charges</span><span id="ei-exc">₹0.00</span></div>
         <div class="trade-info-row"><span>SEBI Charges</span><span id="ei-sebi">₹0.00</span></div>
         <div class="trade-info-row"><span>GST (18% on brok+exc)</span><span id="ei-gst">₹0.00</span></div>
         <div class="trade-info-row"><span>Stamp Duty (buy only)</span><span id="ei-stamp">₹0.00</span></div>
+        <div class="trade-info-row"><span id="ei-margin-label">Margin Required</span><span id="ei-margin">₹0.00</span></div>
         <div class="trade-info-row" style="border-top:1px solid var(--border);margin-top:4px;"><span>Total Charges</span><span id="ei-charges" style="color:var(--red)">₹0.00</span></div>
-        <div class="trade-info-row"><span>Net Total (incl. charges)</span><span id="ei-total">₹${fn(s.price)}</span></div>
+        <div class="trade-info-row"><span id="ei-total-label">Cash Blocked</span><span id="ei-total">₹${fn(s.price / EQUITY_LEVERAGE)}</span></div>
         <div class="trade-info-row"><span>Available Cash</span><span style="color:var(--amber)">₹${fn(state.cash)}</span></div>
       </div>
       <button class="trade-btn ${state.tradeType==='BUY'?'trade-btn-buy':'trade-btn-sell'}" onclick="execEq('${sym}','${state.tradeType}')">
         ${state.tradeType==='BUY'?'▲ BUY':'▼ SELL'} ${sym}
       </button>
     </div>`;
+  calcEq();
   drawChart(sym);
+}
+
+function getEquityCharges(turnover, isBuy) {
+  const stt = turnover * 0.001;
+  const exc = turnover * 0.0000322;
+  const sebi = turnover * 0.000001;
+  const gst = exc * 0.18;
+  const stamp = isBuy ? turnover * 0.00015 : 0;
+  return {
+    brokerage: 0,
+    stt,
+    exc,
+    sebi,
+    gst,
+    stamp,
+    charges: stt + exc + sebi + gst + stamp,
+  };
+}
+
+function calcEq() {
+  const sym = state.selected;
+  const price = parseFloat(document.getElementById('eq-price')?.value || 0);
+  const qty = parseInt(document.getElementById('eq-qty')?.value || 0);
+  if (!price || !qty) return;
+
+  const turnover = price * qty;
+  const isBuy = state.tradeType === 'BUY';
+  const fee = getEquityCharges(turnover, isBuy);
+  const preview = isBuy ? null : previewEquityClose(sym, qty, price);
+  const marginValue = isBuy ? turnover / EQUITY_LEVERAGE : (preview ? preview.marginReleased : 0);
+  const cashImpact = isBuy
+    ? marginValue + fee.charges
+    : ((preview ? preview.marginReleased + preview.realizedPnl : 0) - fee.charges);
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+
+  setText('ei-price', `₹${fn(price)}`);
+  setText('ei-qty', `${qty}`);
+  setText('ei-exposure', `₹${fn(turnover)}`);
+  setText('ei-lev', `${EQUITY_LEVERAGE}x`);
+  setText('ei-brok', `₹${fn(fee.brokerage)}`);
+  setText('ei-stt', `₹${fn(fee.stt)}`);
+  setText('ei-exc', `₹${fn(fee.exc)}`);
+  setText('ei-sebi', `₹${fn(fee.sebi)}`);
+  setText('ei-gst', `₹${fn(fee.gst)}`);
+  setText('ei-stamp', `₹${fn(fee.stamp)}`);
+  setText('ei-margin', `₹${fn(marginValue)}`);
+  setText('ei-charges', `₹${fn(fee.charges)}`);
+  setText('ei-total', `₹${fn(cashImpact)}`);
+  const marginLabel = document.getElementById('ei-margin-label');
+  const totalLabel = document.getElementById('ei-total-label');
+  if (marginLabel) marginLabel.textContent = isBuy ? 'Margin Required' : 'Margin Released';
+  if (totalLabel) totalLabel.textContent = isBuy ? 'Cash Blocked' : 'Expected Cash Credit';
+}
+
+function tickPrices() {
+  refreshPrices();
+}
+
+function setTradeType(type) {
+  state.tradeType = type;
+  renderMarket();
 }
 
 function drawChart(sym) {
@@ -1523,7 +1704,10 @@ function renderPortfolio() {
     const curr = h.type==='EQUITY'?(state.stocks[h.symbol]?.price||h.avgPrice):h.currentPremium;
     return s+curr*h.qty;
   },0);
-  const invested = holdings.reduce((s,h)=>s+h.avgPrice*h.qty,0);
+  const invested = holdings.reduce((s,h)=>{
+    if (h.type === 'EQUITY') return s + (h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE)));
+    return s + h.avgPrice * h.qty;
+  },0);
 
   const rows = holdings.map(h=>{
     const curr = h.type==='EQUITY'?(state.stocks[h.symbol]?.price||h.avgPrice):h.currentPremium;
@@ -1532,12 +1716,16 @@ function renderPortfolio() {
     const cls=pnl>=0?'pos':'neg';
     const tc=h.type==='EQUITY'?'type-equity':h.type==='CALL'?'type-call':'type-put';
     const tl=h.type==='EQUITY'?'EQ':h.type==='CALL'?'CE':'PE';
+    const lev = h.type==='EQUITY' ? `${h.leverage || EQUITY_LEVERAGE}x` : '—';
+    const margin = h.type==='EQUITY' ? (h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE))) : null;
     return `<tr>
       <td><span class="holding-symbol">${h.symbol}</span></td>
       <td><span class="holding-type ${tc}">${tl}</span></td>
       <td>${h.type!=='EQUITY'?`${fn(h.strike)} · ${h.expiry}`:'—'}</td>
       <td>${h.qty}</td>
       <td>₹${fn(h.avgPrice)}</td>
+      <td>${lev}</td>
+      <td>${margin==null?'—':`₹${fn(margin)}`}</td>
       <td>₹${fn(curr)}</td>
       <td>₹${fn(curr*h.qty)}</td>
       <td class="${cls}">₹${fn(Math.abs(pnl))} ${pnl>=0?'▲':'▼'}<br><span style="font-size:10px">${pnl>=0?'+':'-'}${Math.abs(pct)}%</span></td>
@@ -1553,7 +1741,7 @@ function renderPortfolio() {
     </div>
     ${holdings.length ? `
     <table class="holdings-table">
-      <thead><tr><th>Symbol</th><th>Type</th><th>Details</th><th>Qty</th><th>Avg Cost</th><th>CMP</th><th>Value</th><th>P&L</th><th>Action</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Type</th><th>Details</th><th>Qty</th><th>Avg Cost</th><th>Lev</th><th>Margin</th><th>CMP</th><th>Value</th><th>P&L</th><th>Action</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>` : `<div class="empty-state"><div class="empty-icon">📊</div><div style="font-size:16px;margin-bottom:8px;color:var(--dim)">No holdings yet</div><div>Buy stocks or options from Market Watch</div></div>`}`;
 }
@@ -1588,27 +1776,24 @@ function execEq(sym, side) {
   if(!price||!qty) { notify('Invalid price or quantity','error'); return; }
   const turnover = price*qty;
   const isBuy = side==='BUY';
-  const stt   = turnover * 0.001;
-  const exc   = turnover * 0.0000322;
-  const sebi  = turnover * 0.000001;
-  const gst   = exc * 0.18;
-  const stamp = isBuy ? turnover * 0.00015 : 0;
-  const charges = stt + exc + sebi + gst + stamp;
-  const netTotal = isBuy ? turnover + charges : turnover - charges;
+  const fee = getEquityCharges(turnover, isBuy);
+  const marginRequired = turnover / EQUITY_LEVERAGE;
 
   if(side==='BUY'){
-    if(netTotal>state.cash){ notify(`Need ₹${fn(netTotal)} (incl. charges), have ₹${fn(state.cash)}`,'error'); return; }
-    state.cash -= netTotal;
-    addHolding({symbol:sym,type:'EQUITY',qty,avgPrice:price});
-    addOrder({symbol:sym,side:'BUY',qty,price,total:netTotal,desc:`Equity · Charges ₹${fn(charges)}`});
-    notify(`✓ Bought ${qty} × ${sym} @ ₹${fn(price)} | Charges: ₹${fn(charges)}`,'success');
+    const cashBlocked = marginRequired + fee.charges;
+    if(cashBlocked>state.cash){ notify(`Need ₹${fn(cashBlocked)} margin+charges, have ₹${fn(state.cash)}`,'error'); return; }
+    state.cash -= cashBlocked;
+    addHolding({symbol:sym,type:'EQUITY',qty,avgPrice:price,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
+    addOrder({symbol:sym,side:'BUY',qty,price,total:turnover,desc:`Equity · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · Charges ₹${fn(fee.charges)}`});
+    notify(`✓ Bought ${qty} × ${sym} @ ₹${fn(price)} | Exposure ₹${fn(turnover)} | Margin ₹${fn(marginRequired)}`,'success');
   } else {
-    const h = getHolding(sym,'EQUITY');
-    if(!h||h.qty<qty){ notify('Insufficient shares','error'); return; }
-    state.cash += netTotal;
-    removeHolding(h.id,qty);
-    addOrder({symbol:sym,side:'SELL',qty,price,total:netTotal,desc:`Equity · Charges ₹${fn(charges)}`});
-    notify(`✓ Sold ${qty} × ${sym} @ ₹${fn(price)} | Charges: ₹${fn(charges)}`,'success');
+    const preview = previewEquityClose(sym, qty, price);
+    if(!preview || preview.remaining > 0){ notify('Insufficient shares','error'); return; }
+    applyEquityClose(sym, qty);
+    const cashCredit = preview.marginReleased + preview.realizedPnl - fee.charges;
+    state.cash += cashCredit;
+    addOrder({symbol:sym,side:'SELL',qty,price,total:turnover,desc:`Equity exit · Margin ₹${fn(preview.marginReleased)} · P&L ${preview.realizedPnl>=0?'+':''}₹${fn(preview.realizedPnl)} · Charges ₹${fn(fee.charges)}`});
+    notify(`✓ Sold ${qty} × ${sym} @ ₹${fn(price)} | Realized ${preview.realizedPnl>=0?'+':''}₹${fn(preview.realizedPnl)}`,'success');
   }
   updateHeader(); save(); renderContent();
 }
@@ -1636,8 +1821,15 @@ function quickSell(id) {
   const curr = h.type==='EQUITY'?(state.stocks[h.symbol]?.price||h.avgPrice):h.currentPremium;
   const total = curr*h.qty;
   const pnl = (curr-h.avgPrice)*h.qty;
-  state.cash += total;
-  addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,desc:h.type!=='EQUITY'?`${h.symbol} ${h.strike} ${h.type} ${h.expiry}`:'Equity'});
+  if (h.type === 'EQUITY') {
+    const fee = getEquityCharges(total, false);
+    const marginReleased = h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE));
+    state.cash += marginReleased + pnl - fee.charges;
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,desc:`Equity exit · Margin ₹${fn(marginReleased)} · Charges ₹${fn(fee.charges)}`});
+  } else {
+    state.cash += total;
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,desc:`${h.symbol} ${h.strike} ${h.type} ${h.expiry}`});
+  }
   notify(`✓ Sold ${h.symbol} | P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`, pnl>=0?'success':'error');
   delete state.portfolio[id];
   updateHeader(); save(); updateBadges(); renderPortfolio();
@@ -1645,11 +1837,52 @@ function quickSell(id) {
 
 // ── HELPERS ─────────────────────────────────────────────────────────────────
 function selectStock(sym){ state.selected=sym; renderSidebar(); renderContent(); }
-function getHolding(sym,type){ return Object.values(state.portfolio).find(h=>h.symbol===sym&&h.type===type); }
+function getPositions(sym,type){
+  return Object.values(state.portfolio)
+    .filter(h=>h.symbol===sym&&h.type===type)
+    .sort((a,b)=>(parseInt(String(a.id).replace(/\D/g,''),10)||0)-(parseInt(String(b.id).replace(/\D/g,''),10)||0));
+}
+function getHolding(sym,type){ return getPositions(sym,type)[0] || null; }
+function getHoldingSummary(sym,type){
+  const positions = getPositions(sym,type);
+  if(!positions.length) return null;
+  return { qty: positions.reduce((sum, position) => sum + position.qty, 0) };
+}
+function previewEquityClose(sym, qty, exitPrice) {
+  const positions = getPositions(sym, 'EQUITY');
+  if (!positions.length) return null;
+  let remaining = qty;
+  let marginReleased = 0;
+  let realizedPnl = 0;
+  positions.forEach(position => {
+    if (remaining <= 0) return;
+    const closeQty = Math.min(remaining, position.qty);
+    const fullMargin = position.marginUsed || ((position.avgPrice * position.qty) / (position.leverage || EQUITY_LEVERAGE));
+    const marginPerUnit = fullMargin / position.qty;
+    marginReleased += marginPerUnit * closeQty;
+    realizedPnl += (exitPrice - position.avgPrice) * closeQty;
+    remaining -= closeQty;
+  });
+  return { remaining, marginReleased, realizedPnl };
+}
+function applyEquityClose(sym, qty) {
+  const positions = getPositions(sym, 'EQUITY');
+  let remaining = qty;
+  positions.forEach(position => {
+    if (remaining <= 0) return;
+    const closeQty = Math.min(remaining, position.qty);
+    const fullMargin = position.marginUsed || ((position.avgPrice * position.qty) / (position.leverage || EQUITY_LEVERAGE));
+    const marginPerUnit = fullMargin / position.qty;
+    position.qty -= closeQty;
+    position.marginUsed = Math.max(0, fullMargin - marginPerUnit * closeQty);
+    remaining -= closeQty;
+    if (position.qty <= 0) delete state.portfolio[position.id];
+  });
+  updateBadges();
+}
 function addHolding(d){
-  const ex=getHolding(d.symbol,d.type);
-  if(ex&&d.type==='EQUITY'){ const tq=ex.qty+d.qty; ex.avgPrice=(ex.avgPrice*ex.qty+d.avgPrice*d.qty)/tq; ex.qty=tq; }
-  else { const id=`h${state.nextId++}`; state.portfolio[id]={id,...d}; }
+  const id=`h${state.nextId++}`;
+  state.portfolio[id]={id,openedAt:Date.now(),...d};
   updateBadges();
 }
 function removeHolding(id,qty){ const h=state.portfolio[id]; if(!h) return; h.qty-=qty; if(h.qty<=0) delete state.portfolio[id]; updateBadges(); }
@@ -1692,13 +1925,20 @@ function checkMarket(){
 
 // ── STRATEGY SIGNAL (fixes missing function called from drawChart) ──────────
 function updateStrategySignal(sym, candles, ema20, ema50, ema100, ema200, vwap) {
-  const lastVal = arr => { if(!arr) return null; for(let i=arr.length-1;i>=0;i--) if(arr[i]!=null) return arr[i]; return null; };
+  const lastVal = (arr, skip = 0) => {
+    if(!arr) return null;
+    let seen = 0;
+    for(let i=arr.length-1;i>=0;i--) {
+      if(arr[i] == null) continue;
+      if(seen === skip) return arr[i];
+      seen++;
+    }
+    return null;
+  };
   const e20=lastVal(ema20), e50=lastVal(ema50), e100=lastVal(ema100), e200=lastVal(ema200);
   if(!e20||!e50) return;
   // find second-to-last valid values for crossover detection
-  let p20=null, p50=null, found;
-  found=false; for(let i=ema20.length-1;i>=0;i--){ if(ema20[i]!=null){if(!found)found=true;else{p20=ema20[i];break;}} }
-  found=false; for(let i=ema50.length-1;i>=0;i--){ if(ema50[i]!=null){if(!found)found=true;else{p50=ema50[i];break;}} }
+  const p20=lastVal(ema20, 1), p50=lastVal(ema50, 1), p100=lastVal(ema100, 1), p200=lastVal(ema200, 1);
   // prime scan history with real candle closes when chart is viewed
   if(state.stocks[sym] && candles && candles.length > 0) {
     const closes = candles.map(c=>c.close).filter(Boolean);
@@ -1707,17 +1947,17 @@ function updateStrategySignal(sym, candles, ema20, ema50, ema100, ema200, vwap) 
   }
   const el = document.getElementById('strategy-signal');
   if(!el) return;
-  // EMA100/200 alignment check
-  const aligned100_200 = e100&&e200 ? e100>e200 : null;
-  const alignedBull = aligned100_200===true, alignedBear = aligned100_200===false;
+  const alignment = getEmaTrendAlignment(e100, p100, e200, p200, candles?.[candles.length-1]?.close || e50);
+  const alignedBull = alignment.bullish;
+  const alignedBear = alignment.bearish;
   let txt, color;
   if(p20!==null&&p50!==null&&p20<=p50&&e20>e50&&alignedBull)      { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSSOVER \u2014 CONFIRMED BUY'; color='#00e676'; }
-  else if(p20!==null&&p50!==null&&p20<=p50&&e20>e50&&!alignedBull) { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSS \u2014 SKIPPED (EMA100<EMA200)'; color='#ff9800'; }
+  else if(p20!==null&&p50!==null&&p20<=p50&&e20>e50&&!alignedBull) { txt='\u25b2 EMA20 \u00d7 EMA50 BULLISH CROSS \u2014 SKIPPED (EMA100/200 not rising together)'; color='#ff9800'; }
   else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50&&alignedBear)  { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSSOVER \u2014 CONFIRMED SELL'; color='#ff4444'; }
-  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50&&!alignedBear) { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSS \u2014 SKIPPED (EMA100>EMA200)'; color='#ff9800'; }
+  else if(p20!==null&&p50!==null&&p20>=p50&&e20<e50&&!alignedBear) { txt='\u25bc EMA20 \u00d7 EMA50 BEARISH CROSS \u2014 SKIPPED (EMA100/200 not falling together)'; color='#ff9800'; }
   else if(e20>e50) { txt='\u25b2 EMA20 > EMA50 \u2014 Uptrend'; color='#00e676'; }
   else             { txt='\u25bc EMA20 < EMA50 \u2014 Downtrend'; color='#ef5350'; }
-  const alignTxt = e100&&e200 ? `&nbsp;&nbsp;EMA100: \u20b9${fn(e100)} &nbsp; EMA200: \u20b9${fn(e200)} &nbsp; <span style="color:${alignedBull?'#00e676':alignedBear?'#ff4444':'#ff9800'};">[${alignedBull?'\u2191 Bullish':alignedBear?'\u2193 Bearish':'\u2015 Mixed'}]</span>` : '';
+  const alignTxt = e100&&e200 ? `&nbsp;&nbsp;EMA100: \u20b9${fn(e100)} &nbsp; EMA200: \u20b9${fn(e200)} &nbsp; <span style="color:${alignedBull?'#00e676':alignedBear?'#ff4444':'#ff9800'};">[${alignedBull?'\u2191 Both rising':alignedBear?'\u2193 Both falling':'\u2015 Mixed / overlapping'}]</span>` : '';
   el.innerHTML = `<span style="color:${color};font-weight:700;">${txt}</span><span style="color:var(--muted);margin-left:12px;">EMA20: \u20b9${fn(e20)} &nbsp; EMA50: \u20b9${fn(e50)}${alignTxt}</span>`;
 }
 
@@ -1732,6 +1972,31 @@ function _ema(closes, period) {
 function _prevEma(closes, period) {
   if(!closes||closes.length<period+1) return null;
   return _ema(closes.slice(0,-1), period);
+}
+
+function getEmaSlopeDirection(currentValue, previousValue, referencePrice) {
+  if(currentValue == null || previousValue == null) return null;
+  const threshold = Math.max(referencePrice || currentValue || 1, 1) * 0.0003;
+  const delta = currentValue - previousValue;
+  if(Math.abs(delta) <= threshold) return 'flat';
+  return delta > 0 ? 'up' : 'down';
+}
+
+function getEmaTrendAlignment(current100, previous100, current200, previous200, referencePrice) {
+  if(current100 == null || previous100 == null || current200 == null || previous200 == null) {
+    return { bullish: false, bearish: false, sameDirection: false, separated: false };
+  }
+  const dir100 = getEmaSlopeDirection(current100, previous100, referencePrice);
+  const dir200 = getEmaSlopeDirection(current200, previous200, referencePrice);
+  const gapPct = Math.abs(current100 - current200) / Math.max(referencePrice || current200 || 1, 1) * 100;
+  const separated = gapPct >= 0.03;
+  const sameDirection = dir100 && dir100 === dir200 && dir100 !== 'flat';
+  return {
+    bullish: sameDirection && dir100 === 'up' && separated,
+    bearish: sameDirection && dir100 === 'down' && separated,
+    sameDirection,
+    separated,
+  };
 }
 
 async function primeScanner() {
@@ -1763,9 +2028,12 @@ function runScanner() {
     const hitSL=curr<=h.sl, hitTarget=curr>=h.target;
     if(!hitSL&&!hitTarget) return;
     const pnl=(curr-h.avgPrice)*h.qty;
-    state.cash+=curr*h.qty;
-    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total:curr*h.qty,
-      desc:`\ud83e\udd16 AUTO EXIT (${hitTarget?'TARGET HIT':'SL HIT'}) P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`});
+    const exitValue = curr*h.qty;
+    const fee = getEquityCharges(exitValue, false);
+    const marginReleased = h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE));
+    state.cash += marginReleased + pnl - fee.charges;
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total:exitValue,
+      desc:`\ud83e\udd16 AUTO EXIT (${hitTarget?'TARGET HIT':'SL HIT'}) · Margin ₹${fn(marginReleased)} · P&L: ${pnl>=0?'+':''}₹${fn(pnl)} · Charges ₹${fn(fee.charges)}`});
     const sig=state.scannerLog.find(s=>s.sym===h.symbol&&s.status==='EXECUTED');
     if(sig){sig.status=hitTarget?'\u2705 TARGET':'\u274c SL HIT';sig.pnl=pnl;}
     delete state.portfolio[id];
@@ -1781,22 +2049,22 @@ function runScanner() {
     if(!e20||!e50||!p20||!p50) return;
     const bullCross=p20<=p50&&e20>e50, bearCross=p20>=p50&&e20<e50;
     if(!bullCross&&!bearCross) return;
-    // EMA100 & EMA200 must be aligned in same direction (confirmation filter)
+    // EMA100 & EMA200 must move in the same direction and stay separated.
     const e100=_ema(closes,100), e200=_ema(closes,200);
-    const emaAlignedBull = !e100||!e200 || e100>e200;  // if not enough data, don't block
-    const emaAlignedBear = !e100||!e200 || e100<e200;
-    const confirmed = bullCross ? emaAlignedBull : emaAlignedBear;
     const dir=bullCross?'BUY':'SELL';
     const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}`;
     if(state.scannerTraded[key]) return;
     state.scannerTraded[key]=true;
     const entry=s.price||closes[closes.length-1]; if(!entry||entry<=0) return;
+    const p100=_prevEma(closes,100), p200=_prevEma(closes,200);
+    const alignment = getEmaTrendAlignment(e100, p100, e200, p200, entry);
+    const confirmed = bullCross ? alignment.bullish : alignment.bearish;
     const recent=closes.slice(-5);
     const slPrice=bullCross?Math.min(...recent)*0.9995:Math.max(...recent)*1.0005;
     const riskPer=Math.abs(entry-slPrice); if(riskPer<=0) return;
     const qty=Math.max(1,Math.floor(state.scannerRisk/riskPer));
     const target=bullCross?entry+riskPer:entry-riskPer;
-    const emaNote = e100&&e200 ? ` | EMA100${e100>e200?'>':'<'}EMA200` : '';
+    const emaNote = e100&&e200 ? ` | EMA100/200 ${confirmed ? (bullCross ? 'rising' : 'falling') : 'mixed'}` : '';
     const sig={
       id:Date.now()+Math.random(), sym:s.symbol, dir,
       entry:parseFloat(entry.toFixed(2)), sl:parseFloat(slPrice.toFixed(2)),
@@ -1805,16 +2073,17 @@ function runScanner() {
       status:'SIGNAL', pnl:null, confirmed
     };
     if(!confirmed) {
-      sig.status=`SKIPPED (EMA100${e100&&e200?(e100>e200?'>':'<'):'?'}EMA200 against)`;
+      sig.status='SKIPPED (EMA100/200 not aligned)';
     } else if(bullCross) {
       const total=entry*qty;
-      if(total<=state.cash){
-        state.cash-=total;
-        addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target});
+      const marginRequired = total / EQUITY_LEVERAGE;
+      if(marginRequired<=state.cash){
+        state.cash-=marginRequired;
+        addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
         addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,
-          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191${emaNote} SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
+          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191${emaNote} · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
         sig.status='EXECUTED';
-        notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
+        notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | Margin ₹${fn(marginRequired)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
         updateHeader(); save();
       } else { sig.status='SKIPPED (low cash)'; }
     }
@@ -1923,9 +2192,9 @@ function renderScanner() {
           </div>
         </div>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.8;background:var(--bg3);padding:10px 14px;border-radius:4px;">
-          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 <b>AND EMA100 &gt; EMA200</b> \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), SL at 5-candle low, Target at 1:1 RR<br>
-          <b style="color:var(--amber2);">\u26a0 FILTERED:</b> EMA20\u00d7EMA50 crossover detected but EMA100/200 against direction \u2192 logged as SKIPPED, no trade<br>
-          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 with EMA100 &lt; EMA200 \u2192 Shown in log, no short in paper mode<br>
+          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 <b>AND EMA100 + EMA200 are both rising with a visible gap</b> \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), 5x leverage margin, SL at 5-candle low, Target at 1:1 RR<br>
+          <b style="color:var(--amber2);">\u26a0 FILTERED:</b> EMA20\u00d7EMA50 crossover detected but EMA100/200 are mixed, flat, or overlapping \u2192 logged as SKIPPED, no trade<br>
+          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 with EMA100 + EMA200 both falling \u2192 Shown in log, no short in paper mode<br>
           <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target
         </div>
       </div>
