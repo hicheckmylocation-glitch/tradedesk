@@ -192,6 +192,52 @@ canvas{width:100%;height:100px;}
 .sig-sl{background:rgba(255,68,68,0.2);color:#ff4444;}
 .sig-signal{background:rgba(245,166,35,0.15);color:var(--amber);}
 .sig-skipped{background:rgba(120,120,120,0.15);color:var(--muted);}
+/* ── MOBILE RESPONSIVE ─────────────────────────────────────────────────────── */
+#mobile-menu-btn{display:none;}
+#sidebar-overlay{display:none;position:fixed;inset:0;z-index:79;background:transparent;pointer-events:none;transition:background .25s;}
+#sidebar-overlay.show{display:block;background:rgba(0,0,0,0.65);pointer-events:all;}
+@media(max-width:800px){
+  #mobile-menu-btn{display:flex;align-items:center;justify-content:center;background:var(--dim);border:1px solid var(--border);color:var(--amber);width:34px;height:34px;border-radius:4px;cursor:pointer;font-size:18px;flex-shrink:0;}
+  #header{padding:8px 12px;gap:8px;}
+  .logo{font-size:14px;letter-spacing:1px;}
+  .header-stats{gap:8px;}
+  .hstat:nth-child(2){display:none;}
+  .hstat-val{font-size:12px;}
+  .hstat-label{font-size:8px;}
+  .refresh-btn{padding:4px 8px;font-size:10px;letter-spacing:0;}
+  #header>div:first-child>div:last-child{display:none;}
+  #app{grid-template-columns:1fr;height:calc(100dvh - 69px);}
+  #sidebar{position:fixed;left:-290px;top:0;bottom:0;z-index:80;width:280px;height:100dvh;transition:left .25s ease;}
+  #sidebar.open{left:0;box-shadow:6px 0 28px rgba(0,0,0,0.6);}
+  #main{height:calc(100dvh - 69px);}
+  .tabs{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;-ms-overflow-style:none;}
+  .tabs::-webkit-scrollbar{display:none;}
+  .tab-btn{padding:10px 12px;white-space:nowrap;font-size:10px;}
+  .stats-grid{grid-template-columns:repeat(2,1fr);}
+  .portfolio-header{grid-template-columns:1fr 1fr;}
+  .form-row{grid-template-columns:1fr;}
+  #content{padding:12px;}
+  .detail-header{flex-direction:column;gap:8px;}
+  .detail-symbol{font-size:20px;}
+  .detail-price-val{font-size:22px;text-align:left;}
+  .detail-price-chg{text-align:left;}
+  .holdings-table th:nth-child(6),.holdings-table td:nth-child(6),
+  .holdings-table th:nth-child(7),.holdings-table td:nth-child(7){display:none;}
+  .chart-toolbar{padding:6px 8px;gap:4px;overflow-x:auto;flex-wrap:nowrap;}
+  .chart-toolbar::-webkit-scrollbar{display:none;}
+  .chart-sym{font-size:12px;}
+  .ct-btn,.ind-btn{padding:3px 7px;font-size:10px;white-space:nowrap;}
+  canvas{touch-action:none;}
+  .options-table th,.options-table td{padding:5px 6px;font-size:11px;}
+  .order-row{grid-template-columns:auto 1fr auto auto;gap:8px;}
+  .order-row>span:nth-child(3){display:none;}
+  .ohlc-bar>div:last-child{display:none;}
+}
+@media(max-width:480px){
+  .stats-grid{grid-template-columns:1fr 1fr;}
+  .portfolio-header{grid-template-columns:1fr;}
+  .tab-btn{padding:8px 10px;font-size:9px;}
+}
 </style>
 </head>
 <body>
@@ -206,7 +252,8 @@ canvas{width:100%;height:100px;}
 </div>
 
 <div id="header">
-  <div style="display:flex;align-items:center;gap:16px;">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <button id="mobile-menu-btn" onclick="openSidebar()" title="Menu">&#9776;</button>
     <div class="logo">TRADE<span>DESK</span></div>
     <div id="market-status" class="market-badge market-open">● NSE OPEN</div>
     <div style="font-size:10px;color:var(--muted);background:rgba(245,166,35,0.1);border:1px solid rgba(245,166,35,0.2);padding:3px 8px;border-radius:3px;">PREVIEW MODE — Simulated Prices</div>
@@ -221,6 +268,7 @@ canvas{width:100%;height:100px;}
 
 <div id="ticker-bar"><div class="ticker-inner" id="ticker-inner">Loading...</div></div>
 
+<div id="sidebar-overlay" onclick="closeSidebar()"></div>
 <div id="app">
   <div id="sidebar">
     <div class="sidebar-search">
@@ -239,7 +287,7 @@ canvas{width:100%;height:100px;}
       <button class="tab-btn" onclick="setTab('scanner',this)">🤖 Auto Scan</button>
     </div>
     <div id="content">
-      <div class="placeholder"><div class="placeholder-big">← Select a stock to begin</div><div>90+ NSE stocks available</div></div>
+      <div class="placeholder"><div class="placeholder-big">← Select a stock to begin</div><div>160+ NSE stocks &amp; MCX commodities</div></div>
     </div>
   </div>
 </div>
@@ -257,6 +305,7 @@ let state = {
   tradeType: 'BUY',
   optionsData: null,
   selectedExpiry: null,
+  selectedFuturesExpiry: null,
   strikeCenter: null,
   strikeCenterSym: null,
   nextId: 1,
@@ -421,6 +470,7 @@ async function fetchStockList() {
         price: 0, basePrice: 0, change: 0, changePct: 0,
         open: 0, high: 0, low: 0, volume: 0,
         week52High: 0, week52Low: 0, marketCap: 0,
+        defaultPrice: s.defaultPrice || 0,
         history: [],
       };
     });
@@ -462,6 +512,12 @@ async function refreshPrices() {
         s.marketCap = q.marketCap;
         if(q.price > 0) s.history.push(q.price);
         if(s.history.length > 200) s.history.shift();
+        // Feed live price into scanHistory so scanner detects crossovers in real-time
+        if(state.scannerOn && q.price > 0) {
+          if(!s.scanHistory) s.scanHistory = [];
+          s.scanHistory.push(q.price);
+          if(s.scanHistory.length > 350) s.scanHistory.shift();
+        }
       });
     }));
 
@@ -574,7 +630,7 @@ function renderContent() {
   if(state.tab==='orders'){renderOrders();return;}
   if(state.tab==='scanner'){renderScanner();return;}
   if(!state.selected){
-    document.getElementById('content').innerHTML=`<div class="placeholder"><div class="placeholder-big">← Select a stock to trade</div><div>90+ NSE stocks available</div></div>`;
+    document.getElementById('content').innerHTML=`<div class="placeholder"><div class="placeholder-big">← Select a stock to trade</div><div>160+ NSE stocks &amp; MCX commodities</div></div>`;
     return;
   }
   if(state.tab==='market') renderMarket();
@@ -934,7 +990,7 @@ async function loadMoreHistory() {
 
 function buildSimulatedCandles(sym) {
   const s = state.stocks[sym];
-  const basePrice = s.price || s.basePrice || 100;
+  const basePrice = s.price || s.basePrice || s.defaultPrice || 100;
   const tfM = {'1m':1,'5m':5,'10m':10,'15m':15,'30m':30,'1h':60}[chartState.timeframe]||5;
   const count = {'1m':120,'5m':100,'10m':80,'15m':60,'30m':50,'1h':30}[chartState.timeframe]||100;
 
@@ -1546,6 +1602,162 @@ function refreshChartOnTick(){
 
 
 
+// ── COMMODITY FUTURES & OPTIONS ────────────────────────────────────────────
+// MCX month expiry mapping (contracts expire on 5th of each month, or last trading day)
+const MCX_MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function getMcxContracts(spot) {
+  const now = new Date();
+  const contracts = [];
+  for(let add = 0; add < 6; add++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + add, 5);
+    if(d <= now) continue; // already expired
+    const dte = Math.ceil((d - now) / 86400000);
+    const futPrice = spot > 0 ? parseFloat((spot * (1 + 0.065 * dte / 365)).toFixed(2)) : 0;
+    const label = MCX_MONTH_NAMES[d.getMonth()] + ' ' + d.getFullYear();
+    const expiry = d.toISOString().split('T')[0];
+    contracts.push({ label, expiry, dte, price: futPrice });
+    if(contracts.length >= 4) break;
+  }
+  return contracts;
+}
+
+function renderCommodityFutures() {
+  const sym = state.selected;
+  const s = state.stocks[sym]; if(!s) return;
+  const spot = s.price || s.defaultPrice || 0;
+  const contracts = getMcxContracts(spot);
+  if(!contracts.length) { document.getElementById('content').innerHTML = '<div class="placeholder"><div>No active contracts found</div></div>'; return; }
+  if(!state.selectedFuturesExpiry || !contracts.find(c => c.expiry === state.selectedFuturesExpiry))
+    state.selectedFuturesExpiry = contracts[0].expiry;
+  const sel = contracts.find(c => c.expiry === state.selectedFuturesExpiry) || contracts[0];
+  const cls = s.changePct > 0 ? 'pos' : s.changePct < 0 ? 'neg' : 'neu';
+
+  // Options chain on selected futures contract
+  const step = sym==='GOLD'||sym==='GOLDM'?100:sym==='GOLDPETAL'?10:sym==='SILVER'||sym==='SILVERM'?500:sym==='CRUDEOIL'?50:sym==='NATURALGAS'?5:sym==='COPPER'?5:sym==='ZINC'||sym==='ALUMINIUM'?5:50;
+  if(!state.strikeCenter || state.strikeCenterSym !== sym) {
+    state.strikeCenter = Math.round(sel.price / step) * step;
+    state.strikeCenterSym = sym;
+  }
+  const center = state.strikeCenter;
+  const strikes = Array.from({length:19}, (_,i) => center + (i-9)*step).filter(k => k > 0);
+  const iv = 0.15 + Math.random() * 0.08;
+
+  const contractBtns = contracts.map(c =>
+    `<button class="expiry-btn ${c.expiry===state.selectedFuturesExpiry?'active':''}" onclick="state.selectedFuturesExpiry='${c.expiry}';state.strikeCenter=null;renderCommodityFutures()">
+      ${c.label} &nbsp;<span style="font-size:10px;color:var(--muted)">(${c.dte}D)</span>&nbsp; ₹${fn(c.price)}
+    </button>`
+  ).join('');
+
+  const rows = strikes.map(K => {
+    const isATM = Math.abs(K - sel.price) < step * 0.6;
+    const callP = bsPrice(sel.price||spot, K, sel.dte, true, iv);
+    const putP  = bsPrice(sel.price||spot, K, sel.dte, false, iv);
+    return `<tr class="${isATM?'atm-row':''}">
+      <td class="call-premium" onclick="openOptModal('${sym}','CALL',${K},'${sel.expiry}',${callP})">₹${fn(callP)}</td>
+      <td><button class="options-buy-btn call-buy-btn" onclick="openOptModal('${sym}','CALL',${K},'${sel.expiry}',${callP})">BUY CE</button></td>
+      <td class="strike-col">₹${fn(K)}${isATM?'<span style="font-size:9px;color:var(--amber);margin-left:4px">ATM</span>':''}</td>
+      <td><button class="options-buy-btn put-buy-btn" onclick="openOptModal('${sym}','PUT',${K},'${sel.expiry}',${putP})">BUY PE</button></td>
+      <td class="put-premium" onclick="openOptModal('${sym}','PUT',${K},'${sel.expiry}',${putP})">₹${fn(putP)}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="detail-header">
+      <div>
+        <div class="detail-symbol">${sym} <span style="font-size:15px;color:var(--muted)">MCX Futures & Options</span></div>
+        <div class="detail-name">${s.name}</div>
+        <div style="margin-top:6px"><span class="detail-sector-badge" style="color:#f5a623;border-color:rgba(245,166,35,0.3)">MCX Commodity</span></div>
+      </div>
+      <div>
+        <div class="detail-price-val">₹${fn(spot)}</div>
+        <div class="detail-price-chg ${cls}">${s.change>=0?'+':''}₹${Math.abs(s.change||0).toFixed(2)} (${s.changePct>=0?'+':''}${(s.changePct||0).toFixed(2)}%)</div>
+      </div>
+    </div>
+
+    <div class="trade-panel" style="margin-bottom:16px;">
+      <div class="trade-title">📅 Select Contract Month</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">${contractBtns}</div>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;background:var(--bg3);padding:12px 16px;border-radius:4px;margin-bottom:14px;">
+        <div><div class="stat-label">Spot Price</div><div style="font-size:18px;font-weight:700;color:var(--amber)">₹${fn(spot)}</div></div>
+        <div><div class="stat-label">${sel.label} Futures</div><div style="font-size:18px;font-weight:700;color:var(--blue)">₹${fn(sel.price)}</div></div>
+        <div><div class="stat-label">Expiry</div><div style="font-weight:700">${sel.expiry}</div></div>
+        <div><div class="stat-label">Days Left</div><div style="font-weight:700">${sel.dte}D</div></div>
+        <div><div class="stat-label">Basis (Fut−Spot)</div><div style="font-weight:700;color:var(--green)">+₹${fn(sel.price - spot)}</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <button class="trade-btn trade-btn-buy" onclick="openFuturesModal('${sym}','BUY','${sel.expiry}',${sel.price})">▲ BUY ${sel.label} FUTURE</button>
+        <button class="trade-btn trade-btn-sell" onclick="openFuturesModal('${sym}','SELL','${sel.expiry}',${sel.price})">▼ SELL ${sel.label} FUTURE</button>
+      </div>
+    </div>
+
+    <div class="trade-title" style="margin-bottom:10px;">Options Chain — ${sel.label} (${sel.dte}D) &nbsp;<span style="font-size:10px;color:var(--muted);font-weight:400">Futures price: ₹${fn(sel.price)}</span></div>
+    <div style="overflow-x:auto;">
+      <table class="options-table">
+        <thead>
+          <tr>
+            <th colspan="2" style="color:var(--green)">CALLS (CE)</th>
+            <th style="color:var(--amber)">STRIKE</th>
+            <th colspan="2" style="color:var(--red)">PUTS (PE)</th>
+          </tr>
+          <tr><th>Premium</th><th>Trade</th><th class="strike-col">Price</th><th>Trade</th><th>Premium</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="margin-top:10px;font-size:10px;color:var(--muted);">
+      ⚠ Futures = Spot + Cost of Carry (6.5% p.a.). Premiums via Black-Scholes. MCX expiry = 5th of month.
+    </div>`;
+}
+
+function openFuturesModal(sym, side, expiry, price) {
+  const s = state.stocks[sym];
+  document.getElementById('modal-title').textContent = `${sym} ${expiry} Future — ${side}`;
+  document.getElementById('modal-body').innerHTML = `
+    <div class="trade-info" style="margin-bottom:14px">
+      <div class="trade-info-row"><span>Instrument</span><span style="font-weight:700;color:var(--amber)">${s.name}</span></div>
+      <div class="trade-info-row"><span>Contract</span><span>${sym} ${expiry} FUTURE</span></div>
+      <div class="trade-info-row"><span>Futures Price</span><span style="font-weight:700">₹${fn(price)}</span></div>
+      <div class="trade-info-row"><span>Side</span><span style="color:${side==='BUY'?'var(--green)':'var(--red)'};font-weight:700">${side}</span></div>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <div class="form-label">Lots</div>
+      <input class="form-input" id="fut-qty" type="number" value="1" min="1" oninput="calcFutures(${price})"/>
+    </div>
+    <div class="trade-info" style="margin-bottom:14px">
+      <div class="trade-info-row"><span>Contract Value</span><span id="fut-total">₹${fn(price)}</span></div>
+      <div class="trade-info-row"><span>Margin Required (10%)</span><span id="fut-margin">₹${fn(price*0.1)}</span></div>
+      <div class="trade-info-row"><span>Available Cash</span><span style="color:var(--amber)">₹${fn(state.cash)}</span></div>
+    </div>
+    <button class="trade-btn ${side==='BUY'?'trade-btn-buy':'trade-btn-sell'}" onclick="execFutures('${sym}','${side}','${expiry}',${price})">
+      ${side==='BUY'?'▲ BUY':'▼ SELL'} ${sym} ${expiry} FUTURE
+    </button>
+    <div style="margin-top:10px;font-size:10px;color:var(--muted);text-align:center">Paper trading — virtual ₹ only · 10x leverage</div>`;
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+function calcFutures(price) {
+  const qty = parseInt(document.getElementById('fut-qty')?.value || 1);
+  const total = price * qty;
+  const el1 = document.getElementById('fut-total');
+  const el2 = document.getElementById('fut-margin');
+  if(el1) el1.textContent = `₹${fn(total)}`;
+  if(el2) el2.textContent = `₹${fn(total * 0.1)}`;
+}
+
+function execFutures(sym, side, expiry, price) {
+  const qty = parseInt(document.getElementById('fut-qty')?.value || 1);
+  const total = price * qty;
+  const margin = total * 0.1;
+  const label = `${sym} ${expiry} FUTURE`;
+  if(margin > state.cash) { notify(`Need ₹${fn(margin)} margin, have ₹${fn(state.cash)}`, 'error'); return; }
+  state.cash -= margin;
+  addHolding({ symbol: sym, type: 'EQUITY', qty, avgPrice: price, marginUsed: margin, leverage: 10, futuresExpiry: expiry });
+  addOrder({ symbol: sym, side, qty, price, total, desc: `${label} · 10x · Margin ₹${fn(margin)}` });
+  notify(`✓ ${side} ${qty}× ${label} @ ₹${fn(price)} | Margin ₹${fn(margin)}`, 'success');
+  closeModal(); updateHeader(); save(); updateBadges();
+}
+
 // ── OPTIONS ────────────────────────────────────────────────────────────────
 function jumpToStrike(val) {
   const sym = state.selected;
@@ -1566,6 +1778,8 @@ function resetStrikeCenter() {
 function renderOptions() {
   const sym = state.selected;
   const s = state.stocks[sym]; if(!s) return;
+  // Route commodity symbols to the MCX futures UI
+  if(s.sector === 'Commodity') { renderCommodityFutures(); return; }
   const spot = s.price;
 
   // Generate expiries (next 4 Thursdays)
@@ -1836,7 +2050,7 @@ function quickSell(id) {
 }
 
 // ── HELPERS ─────────────────────────────────────────────────────────────────
-function selectStock(sym){ state.selected=sym; renderSidebar(); renderContent(); }
+function selectStock(sym){ state.selected=sym; renderSidebar(); renderContent(); closeSidebar(); }
 function getPositions(sym,type){
   return Object.values(state.portfolio)
     .filter(h=>h.symbol===sym&&h.type===type)
@@ -1921,6 +2135,15 @@ function checkMarket(){
   const el=document.getElementById('market-status');
   el.textContent=open?'● NSE OPEN':'● NSE CLOSED';
   el.className='market-badge '+(open?'market-open':'market-closed');
+}
+
+function openSidebar() {
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebar-overlay').classList.add('show');
+}
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-overlay').classList.remove('show');
 }
 
 // ── STRATEGY SIGNAL (fixes missing function called from drawChart) ──────────
@@ -2224,7 +2447,7 @@ function renderScanner() {
         ${state.scannerLog.length===0?`
           <div style="text-align:center;padding:40px;color:var(--muted);">
             <div style="font-size:36px;margin-bottom:12px;">\ud83d\udce1</div>
-            <div style="font-size:14px;margin-bottom:6px;">${state.scannerOn?'Scanning all '+totalStocks+' stocks for EMA20\u00d7EMA50 crossovers...':'Turn ON scanner to start'}</div>
+            <div style="font-size:14px;margin-bottom:6px;">${state.scannerOn?'Scanning all '+totalStocks+' instruments for EMA20\u00d7EMA50 crossovers...':'Turn ON scanner to start'}</div>
             ${state.scannerOn&&primedCount<totalStocks?`<div style="font-size:11px;color:var(--amber);">Priming candle data: ${primedCount}/${totalStocks} stocks ready</div>`:''}
           </div>
         `:`
@@ -2247,6 +2470,16 @@ function renderScanner() {
 // ── START ────────────────────────────────────────────────────────────────────
 // init() handles everything above
 setInterval(checkMarket,60000);
+// Scanner: independent 30s tick so crossovers are caught without waiting for full refresh
+setInterval(() => { if(state.scannerOn) runScanner(); }, 30000);
+// Scanner: re-prime candle history every 15 minutes to load fresh 5m bars from Yahoo
+let _lastReprime = 0;
+setInterval(() => {
+  if(state.scannerOn && Date.now() - _lastReprime > 15 * 60 * 1000) {
+    _lastReprime = Date.now();
+    primeScanner();
+  }
+}, 60000);
 </script>
 </body>
 </html>
