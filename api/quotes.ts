@@ -67,6 +67,65 @@ function fetchChartFallback(yahooSym) {
   });
 }
 
+// ── LIVE MCX PRICE DERIVATION ─────────────────────────────────────────────
+// Yahoo Finance has no MCX feed, but we can derive accurate INR prices from
+// international futures (COMEX/NYMEX) + live USD/INR rate.
+const INTL_REFS = ['GC=F','SI=F','BZ=F','NG=F','HG=F','INR=X'];
+
+async function fetchIntlRates(): Promise<Record<string, { price: number; prev: number }>> {
+  const quotes: any[] = await fetchBatchV7(INTL_REFS) as any[];
+  const r: Record<string, { price: number; prev: number }> = {};
+  quotes.forEach(q => {
+    if(q.regularMarketPrice) r[q.symbol] = { price: q.regularMarketPrice, prev: q.regularMarketPreviousClose || q.regularMarketPrice };
+  });
+  return r;
+}
+
+// Derive MCX INR prices from international rates
+// Returns map of { symbol → { price, prev } }
+function deriveMCXPrices(rates: Record<string, { price: number; prev: number }>): Record<string, { price: number; prev: number }> {
+  const out: Record<string, { price: number; prev: number }> = {};
+  const USDINR   = rates['INR=X']?.price || 84;
+  const prevINR  = rates['INR=X']?.prev  || USDINR;
+  const TROY     = 31.1035; // grams per troy oz
+  // MCX import duty + GST premium over COMEX (~3.5% for gold, ~5% for silver)
+  const GOLD_PREM = 1.035;
+  const SILV_PREM = 1.05;
+
+  const gcNow  = rates['GC=F']?.price, gcPrev = rates['GC=F']?.prev;
+  const siNow  = rates['SI=F']?.price, siPrev = rates['SI=F']?.prev;
+  const bzNow  = rates['BZ=F']?.price, bzPrev = rates['BZ=F']?.prev;
+  const ngNow  = rates['NG=F']?.price, ngPrev = rates['NG=F']?.prev;
+  const hgNow  = rates['HG=F']?.price, hgPrev = rates['HG=F']?.prev;
+
+  if(gcNow) {
+    const goldPer10g     = (gcNow  / TROY) * 10 * USDINR * GOLD_PREM;
+    const goldPer10gPrev = (gcPrev / TROY) * 10 * prevINR * GOLD_PREM;
+    out['GOLD']      = { price: Math.round(goldPer10g),      prev: Math.round(goldPer10gPrev) };
+    out['GOLDM']     = { price: Math.round(goldPer10g),      prev: Math.round(goldPer10gPrev) };
+    out['GOLDPETAL'] = { price: Math.round(goldPer10g / 10), prev: Math.round(goldPer10gPrev / 10) };
+  }
+  if(siNow) {
+    const silverPerKg     = (siNow  / TROY) * 1000 * USDINR * SILV_PREM;
+    const silverPerKgPrev = (siPrev / TROY) * 1000 * prevINR * SILV_PREM;
+    out['SILVER']  = { price: Math.round(silverPerKg),     prev: Math.round(silverPerKgPrev) };
+    out['SILVERM'] = { price: Math.round(silverPerKg),     prev: Math.round(silverPerKgPrev) };
+  }
+  if(bzNow) {
+    // MCX Crude Oil tracks Brent (BZ=F), ₹/barrel
+    out['CRUDEOIL'] = { price: Math.round(bzNow * USDINR), prev: Math.round(bzPrev * prevINR) };
+  }
+  if(ngNow) {
+    // MCX Natural Gas tracks NYMEX NG, ₹/mmBtu
+    out['NATURALGAS'] = { price: parseFloat((ngNow * USDINR).toFixed(1)), prev: parseFloat((ngPrev * prevINR).toFixed(1)) };
+  }
+  if(hgNow) {
+    // HG=F is USD/pound; MCX Copper is ₹/kg; 1kg = 2.20462 lbs
+    out['COPPER'] = { price: Math.round(hgNow * 2.20462 * USDINR), prev: Math.round(hgPrev * 2.20462 * prevINR) };
+  }
+  return out;
+}
+
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "s-maxage=30");
@@ -137,27 +196,35 @@ module.exports = async (req, res) => {
     }));
   }
 
-  // Step 3: for symbols still missing (e.g. MCX commodities not on Yahoo),
-  // use defaultPrice with ±0.3% jitter so they always show a live-looking value
+  // Step 3: MCX commodities — derive live INR prices from COMEX/NYMEX + USD/INR
   const stillMissing = requested.filter(sym => !result[sym]);
-  stillMissing.forEach(sym => {
-    const dp = DEFAULT_PRICES[sym];
-    if(!dp) return;
-    const jitter = 1 + (Math.random() - 0.5) * 0.006;
-    const price = parseFloat((dp * jitter).toFixed(2));
-    const change = parseFloat(((Math.random() - 0.5) * dp * 0.005).toFixed(2));
-    result[sym] = {
-      symbol: sym, price,
-      change,
-      changePct: parseFloat((change / (price - change) * 100).toFixed(2)),
-      volume: 0,
-      high: parseFloat((price * 1.002).toFixed(2)),
-      low: parseFloat((price * 0.998).toFixed(2)),
-      open: parseFloat((price - change).toFixed(2)),
-      close: parseFloat((price - change).toFixed(2)),
-      week52High: 0, week52Low: 0, marketCap: 0,
-    };
-  });
+  if (stillMissing.length > 0) {
+    let derived: Record<string, { price: number; prev: number }> = {};
+    try {
+      const intlRates = await fetchIntlRates();
+      derived = deriveMCXPrices(intlRates);
+    } catch(e) {}
+
+    stillMissing.forEach(sym => {
+      const d = derived[sym];
+      const dp = DEFAULT_PRICES[sym];
+      const price  = d?.price  || dp;
+      const prev   = d?.prev   || dp;
+      if(!price) return;
+      const change = parseFloat((price - prev).toFixed(2));
+      result[sym] = {
+        symbol: sym, price,
+        change,
+        changePct: parseFloat(((change / (prev || price)) * 100).toFixed(2)),
+        volume: 0,
+        high: parseFloat((price * 1.002).toFixed(2)),
+        low:  parseFloat((price * 0.998).toFixed(2)),
+        open: prev,
+        close: prev,
+        week52High: 0, week52Low: 0, marketCap: 0,
+      };
+    });
+  }
 
   res.json(result);
 };
