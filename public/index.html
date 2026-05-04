@@ -477,6 +477,7 @@ async function fetchStockList() {
         week52High: 0, week52Low: 0, marketCap: 0,
         defaultPrice: s.defaultPrice || 0,
         history: [],
+        _chartCandles: [],
       };
     });
     buildSectors();
@@ -913,6 +914,21 @@ async function fetchAndDrawChart(sym) {
   const statusEl = document.getElementById('ct-fetch-status');
   if(statusEl) statusEl.textContent = '⟳ Fetching...';
 
+  // Check if we already have cached real candles for this symbol in this session
+  if(state.stocks[sym]._chartCandles && state.stocks[sym]._chartCandles.length > 10) {
+    chartState._candles = state.stocks[sym]._chartCandles;
+    chartState._noMoreHistory = false;
+    chartState._loadingMore = false;
+    chartState.panOffset = 0;
+    chartState.priceScale = 1.0;
+    chartState.priceOffset = 0;
+    if(statusEl) statusEl.textContent = `✓ Cached real candles`;
+    drawChart();
+    setupChartInteraction();
+    setupChartResize();
+    return;
+  }
+
   const tfMap    = {'1m':'1m','5m':'5m','10m':'5m','15m':'15m','30m':'30m','1h':'60m'};
   const rangeMap = {'1m':'7d','5m':'60d','10m':'60d','15m':'60d','30m':'60d','1h':'2y'};
   const interval = tfMap[chartState.timeframe]  || '5m';
@@ -927,15 +943,19 @@ async function fetchAndDrawChart(sym) {
       const data = await res.json();
       if(data.candles && data.candles.length > 3) {
         rawCandles = data.candles;
+        // Cache real candles so we don't regenerate them on every chart re-render
+        state.stocks[sym]._chartCandles = rawCandles;
         if(statusEl) statusEl.textContent = `✓ ${rawCandles.length} real candles · Yahoo Finance`;
       }
     }
   } catch(e) {}
 
-  // Fallback to simulated realistic candles
+  // If no real data, use simulated (only generate once and cache)
   if(!rawCandles || rawCandles.length < 3) {
-    if(statusEl) statusEl.textContent = '⚡ Simulated — deploy to Vercel for real data';
+    if(statusEl) statusEl.textContent = '⚡ Simulated data';
     rawCandles = buildSimulatedCandles(sym);
+    // Cache simulated candles too, so they don't change on re-render
+    state.stocks[sym]._chartCandles = rawCandles;
   }
 
   if(chartState.timeframe === '10m') rawCandles = aggregateCandles(rawCandles, 2);
@@ -1081,8 +1101,8 @@ function drawChart() {
   const baseVisible = Math.round((TF_CANDLES[chartState.timeframe]||60) / chartState.zoom);
   const visibleCount = Math.min(baseVisible, allCandles.length);
   chartState._visibleCandles = visibleCount;
-  // Allow panning ~30% beyond the last candle for future space (common in trading charts)
-  const maxPan = Math.max(0, allCandles.length - visibleCount + Math.floor(visibleCount * 0.3));
+  // Allow panning 100% beyond the last candle for dragging space (matches TradingView/Zerodha)
+  const maxPan = Math.max(0, allCandles.length - visibleCount + Math.floor(visibleCount * 1.0));
   chartState.panOffset = Math.min(Math.max(0, chartState.panOffset), maxPan);
 
   // Lazy-load older candles when user pans to the left edge
