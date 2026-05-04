@@ -1081,7 +1081,8 @@ function drawChart() {
   const baseVisible = Math.round((TF_CANDLES[chartState.timeframe]||60) / chartState.zoom);
   const visibleCount = Math.min(baseVisible, allCandles.length);
   chartState._visibleCandles = visibleCount;
-  const maxPan = Math.max(0, allCandles.length - visibleCount);
+  // Allow panning ~30% beyond the last candle for future space (common in trading charts)
+  const maxPan = Math.max(0, allCandles.length - visibleCount + Math.floor(visibleCount * 0.3));
   chartState.panOffset = Math.min(Math.max(0, chartState.panOffset), maxPan);
 
   // Lazy-load older candles when user pans to the left edge
@@ -2261,20 +2262,18 @@ function getEmaSlopeDirection(currentValue, previousValue, referencePrice) {
 }
 
 function getEmaTrendAlignment(current100, previous100, current200, previous200, referencePrice) {
-  if(current100 == null || previous100 == null || current200 == null || previous200 == null) {
-    return { bullish: false, bearish: false, sameDirection: false, separated: false };
+  // Use price position relative to EMAs — much more reliable than slope on 60s bars
+  // where EMAs barely move between ticks and always register as "flat"
+  if(current100 == null || current200 == null) {
+    // If we don't have EMA100/200, allow trade — don't block on missing data
+    return { bullish: true, bearish: true, sameDirection: true, separated: true };
   }
-  const dir100 = getEmaSlopeDirection(current100, previous100, referencePrice);
-  const dir200 = getEmaSlopeDirection(current200, previous200, referencePrice);
-  const gapPct = Math.abs(current100 - current200) / Math.max(referencePrice || current200 || 1, 1) * 100;
-  const separated = gapPct >= 0.03;
-  const sameDirection = dir100 && dir100 === dir200 && dir100 !== 'flat';
-  return {
-    bullish: sameDirection && dir100 === 'up' && separated,
-    bearish: sameDirection && dir100 === 'down' && separated,
-    sameDirection,
-    separated,
-  };
+  const price = referencePrice || current100;
+  // Bullish: price above EMA100 AND EMA100 > EMA200 (uptrend stack)
+  const bullish = price > current100 && current100 >= current200;
+  // Bearish: price below EMA100 AND EMA100 < EMA200 (downtrend stack)
+  const bearish = price < current100 && current100 <= current200;
+  return { bullish, bearish, sameDirection: bullish || bearish, separated: true };
 }
 
 async function primeScanner() {
