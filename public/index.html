@@ -2522,6 +2522,10 @@ function runScanner() {
     if(!e20||!e50||!p20||!p50) return;
     const bullCross=p20<=p50&&e20>e50, bearCross=p20>=p50&&e20<e50;
     if(!bullCross&&!bearCross) return;
+    // ── GAP CHECK: Reject if EMA20 & EMA50 have large gap (price will retrace to fill it) ──
+    const gapPct = Math.abs(e20 - e50) / Math.max(e50, 1) * 100;
+    const MAX_GAP = 0.5; // Max 0.5% gap allowed
+    if(gapPct > MAX_GAP) return;
     // EMA100 & EMA200 must move in the same direction and stay separated.
     const e100=_ema(closes,100), e200=_ema(closes,200);
     const dir=bullCross?'BUY':'SELL';
