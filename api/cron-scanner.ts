@@ -124,6 +124,23 @@ async function fetchCandles(yahooSym: string): Promise<{ closes: number[]; lastT
   return { closes, lastTime };
 }
 
+async function fetchCandles15m(yahooSym: string): Promise<{ closes: number[]; lastTime: number }> {
+  const p = `/v8/finance/chart/${encodeURIComponent(yahooSym)}?range=5d&interval=15m&includePrePost=false`;
+  const data = await getJson('query1.finance.yahoo.com', p, 10000);
+  const result = data?.chart?.result?.[0];
+  const rawCloses = result?.indicators?.quote?.[0]?.close || [];
+  const rawTimes = result?.timestamp || [];
+  const closes: number[] = [];
+  let lastTime = 0;
+  rawCloses.forEach((v: any, i: number) => {
+    if (v != null && v > 0) {
+      closes.push(v);
+      lastTime = rawTimes[i] || lastTime;
+    }
+  });
+  return { closes, lastTime };
+}
+
 function ema(closes: number[], period: number): number | null {
   if (!closes || closes.length < period) return null;
   const k = 2 / (period + 1);
@@ -255,6 +272,27 @@ module.exports = async (req: any, res: any) => {
       const bullCross = p20 <= p50 && e20 > e50;
       const bearCross = p20 >= p50 && e20 < e50;
       if (!bullCross && !bearCross) return;
+
+      // ── GAP CHECK: Only take signal if EMA20 & EMA50 are close (small gap = true signal) ──
+      const gapPct = Math.abs(e20 - e50) / Math.max(e50, 1) * 100;
+      const MAX_GAP = 0.5;
+      if (gapPct > MAX_GAP) return;
+
+      // ── 15m RESISTANCE/SUPPORT CHECK: Avoid entries too close to 15m EMA100/200 ──
+      let skip15m = false;
+      try {
+        const c15m = await fetchCandles15m(symToYahoo[sym]);
+        if (c15m.closes.length >= 100) {
+          const e100_15m = ema(c15m.closes, 100);
+          const e200_15m = ema(c15m.closes, 200);
+          const price = prices[sym]?.price || closes[closes.length - 1];
+          // For BUY: skip if price is too close to 15m EMA100 resistance (within 0.5% above)
+          if (bullCross && e100_15m && price < e100_15m * 1.005) skip15m = true;
+          // For SELL: skip if price is too close to 15m EMA200 support (within 0.5% below)
+          if (bearCross && e200_15m && price > e200_15m * 0.995) skip15m = true;
+        }
+      } catch(e) {}
+      if (skip15m) return;
 
       const e100 = ema(closes, 100), e200 = ema(closes, 200);
       const price = prices[sym]?.price || closes[closes.length - 1];
