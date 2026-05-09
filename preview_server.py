@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,18 +21,31 @@ STOCKS_FILE = ROOT / 'api' / '_stockUniverse.js'
 
 def parse_stock_universe():
     raw = STOCKS_FILE.read_text(encoding='utf-8')
-    pattern = re.compile(
-        r"\{ symbol: '([^']+)', name: '([^']+)', sector: '([^']+)'(?:, yahoo: '([^']+)')? \}"
-    )
     stocks = []
     quote_symbols = {}
-    for symbol, name, sector, yahoo in pattern.findall(raw):
-        stocks.append({'symbol': symbol, 'name': name, 'sector': sector})
-        quote_symbols[symbol] = yahoo or f'{symbol}.NS'
-    return stocks, quote_symbols
+    default_prices = {}
+    for block in re.findall(r"\{([^{}]+)\}", raw):
+        symbol = re.search(r"symbol: '([^']+)'", block)
+        name = re.search(r"name: '([^']+)'", block)
+        sector = re.search(r"sector: '([^']+)'", block)
+        if not symbol or not name or not sector:
+            continue
+        yahoo = re.search(r"yahoo: '([^']+)'", block)
+        default_price = re.search(r"defaultPrice: ([0-9.]+)", block)
+        symbol = symbol.group(1)
+        stock = {'symbol': symbol, 'name': name.group(1), 'sector': sector.group(1)}
+        if default_price:
+            stock['defaultPrice'] = float(default_price.group(1))
+            default_prices[symbol] = stock['defaultPrice']
+        stocks.append(stock)
+        quote_symbols[symbol] = yahoo.group(1) if yahoo else f'{symbol}.NS'
+    return stocks, quote_symbols, default_prices
 
 
-STOCKS, QUOTE_SYMBOLS = parse_stock_universe()
+STOCKS, QUOTE_SYMBOLS, DEFAULT_PRICES = parse_stock_universe()
+GOLD_SYMBOLS = {'GOLD', 'GOLDM', 'GOLDPETAL'}
+TROY = 31.1035
+GOLD_PREM = 1.035
 STATE_LOCK = threading.Lock()
 DEFAULT_STATE = {
     'cash': 1000000,
@@ -136,20 +150,10 @@ def fetch_quote(symbol):
     }
 
 
-def fetch_history(symbol, interval, range_value, period1=None, period2=None):
-    yahoo_symbol = QUOTE_SYMBOLS.get(symbol, f'{symbol}.NS')
-    if period1 and period2:
-        time_part = f'period1={period1}&period2={period2}'
-    else:
-        time_part = f'range={urllib.parse.quote(range_value)}'
-    url = (
-        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yahoo_symbol)}'
-        f'?interval={urllib.parse.quote(interval)}&{time_part}&includePrePost=false'
-    )
-    data = fetch_json(url)
+def chart_candles(data):
     result = ((data.get('chart') or {}).get('result') or [None])[0]
     if not result:
-        return {'error': 'No data'}, 404
+        return []
     timestamps = result.get('timestamp') or []
     quote = ((result.get('indicators') or {}).get('quote') or [{}])[0]
     candles = []
@@ -169,6 +173,134 @@ def fetch_history(symbol, interval, range_value, period1=None, period2=None):
             'close': close_val,
             'vol': vol_val or 0,
         })
+    return candles
+
+
+def derive_gold_price(usd_per_oz, usd_inr, symbol):
+    per_10g = (usd_per_oz / TROY) * 10 * usd_inr * GOLD_PREM
+    return per_10g / 10 if symbol == 'GOLDPETAL' else per_10g
+
+
+def moving_fallback_price(default_price, symbol):
+    now = int(time.time())
+    day = now // 86400
+    minute = now // 60
+    seed = sum(ord(ch) for ch in symbol)
+    day_wave = math.sin((day + seed) * 1.7) * 0.006
+    minute_wave = math.sin((minute + seed) / 11) * 0.0025
+    prev_wave = math.sin((day - 1 + seed) * 1.7) * 0.006
+    return {
+        'price': round(default_price * (1 + day_wave + minute_wave), 2),
+        'prev': round(default_price * (1 + prev_wave), 2),
+    }
+
+
+def fetch_derived_gold_quote(symbol):
+    quotes = fetch_batch_v7(['GC=F', 'INR=X'])
+    rates = {q.get('symbol'): q for q in quotes}
+    gc = rates.get('GC=F') or {}
+    inr = rates.get('INR=X') or {}
+    gc_price = gc.get('regularMarketPrice')
+    if not gc_price:
+        return None
+    gc_prev = gc.get('regularMarketPreviousClose') or gc_price
+    usd_inr = inr.get('regularMarketPrice') or 84
+    prev_inr = inr.get('regularMarketPreviousClose') or usd_inr
+    price = round(derive_gold_price(gc_price, usd_inr, symbol), 2)
+    prev = round(derive_gold_price(gc_prev, prev_inr, symbol), 2)
+    change = round(price - prev, 2)
+    return {
+        'symbol': symbol,
+        'price': price,
+        'change': change,
+        'changePct': round((change / (prev or price)) * 100, 2),
+        'volume': gc.get('regularMarketVolume') or 0,
+        'high': round(derive_gold_price(gc.get('regularMarketDayHigh') or gc_price, usd_inr, symbol), 2),
+        'low': round(derive_gold_price(gc.get('regularMarketDayLow') or gc_price, usd_inr, symbol), 2),
+        'open': round(derive_gold_price(gc.get('regularMarketOpen') or gc_price, usd_inr, symbol), 2),
+        'close': prev,
+        'week52High': 0,
+        'week52Low': 0,
+        'marketCap': 0,
+    }
+
+
+def fetch_derived_gold_history(symbol, interval, time_part):
+    gold = chart_candles(fetch_json(
+        f'https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?interval={urllib.parse.quote(interval)}&{time_part}&includePrePost=false'
+    ))
+    inr = chart_candles(fetch_json(
+        f'https://query1.finance.yahoo.com/v8/finance/chart/INR%3DX?interval={urllib.parse.quote(interval)}&{time_part}&includePrePost=false'
+    ))
+    if not gold:
+        return []
+    last_inr = next((c['close'] for c in inr if c.get('close')), 84)
+    inr_index = 0
+    candles = []
+    for c in gold:
+        while inr_index < len(inr) and inr[inr_index]['time'] <= c['time']:
+            last_inr = inr[inr_index].get('close') or last_inr
+            inr_index += 1
+        candles.append({
+            'time': c['time'],
+            'open': round(derive_gold_price(c['open'], last_inr, symbol), 2),
+            'high': round(derive_gold_price(c['high'], last_inr, symbol), 2),
+            'low': round(derive_gold_price(c['low'], last_inr, symbol), 2),
+            'close': round(derive_gold_price(c['close'], last_inr, symbol), 2),
+            'vol': c.get('vol') or 0,
+        })
+    return candles
+
+
+def fallback_gold_history(symbol, interval, range_value):
+    base = DEFAULT_PRICES.get(symbol, 15250 if symbol == 'GOLDPETAL' else 152500)
+    interval_minutes = {'1m': 1, '5m': 5, '10m': 10, '15m': 15, '30m': 30, '60m': 60, '1h': 60}.get(interval, 5)
+    count = {'1d': 80, '5d': 160, '7d': 220, '60d': 260, '2y': 320}.get(range_value, 160)
+    now = int(time.time() * 1000)
+    seed = sum(ord(ch) for ch in symbol)
+    close = base * (1 + math.sin(((now // 86400000) + seed) * 1.7) * 0.006)
+    candles = []
+    for i in range(count - 1, -1, -1):
+        ts = now - i * interval_minutes * 60000
+        wave = math.sin(((ts // 60000) + seed) / 11) * 0.0018
+        drift = math.sin(((ts // 86400000) + seed) * 1.7) * 0.0005
+        open_val = close
+        close = max(base * 0.95, open_val * (1 + wave + drift))
+        spread = max(base * 0.0008, abs(close - open_val) * 1.4)
+        candles.append({
+            'time': ts,
+            'open': round(open_val, 2),
+            'high': round(max(open_val, close) + spread, 2),
+            'low': round(min(open_val, close) - spread, 2),
+            'close': round(close, 2),
+            'vol': 0,
+        })
+    return candles
+
+
+def fetch_history(symbol, interval, range_value, period1=None, period2=None):
+    yahoo_symbol = QUOTE_SYMBOLS.get(symbol, f'{symbol}.NS')
+    if period1 and period2:
+        time_part = f'period1={period1}&period2={period2}'
+    else:
+        time_part = f'range={urllib.parse.quote(range_value)}'
+    if symbol in GOLD_SYMBOLS:
+        try:
+            candles = fetch_derived_gold_history(symbol, interval, time_part)
+        except Exception:
+            candles = []
+        if len(candles) > 3:
+            return {'candles': candles, 'source': 'derived-gold', 'count': len(candles)}, 200
+        candles = fallback_gold_history(symbol, interval, range_value)
+        return {'candles': candles, 'source': 'fallback-gold', 'count': len(candles)}, 200
+    url = (
+        f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yahoo_symbol)}'
+        f'?interval={urllib.parse.quote(interval)}&{time_part}&includePrePost=false'
+    )
+    data = fetch_json(url)
+    candles = chart_candles(data)
+    if not candles:
+        return {'error': 'No data'}, 404
     return {'candles': candles, 'source': 'yahoo', 'count': len(candles)}, 200
 
 
@@ -238,6 +370,26 @@ class PreviewHandler(BaseHTTPRequestHandler):
                         result[symbol] = quote
             with ThreadPoolExecutor(max_workers=20) as pool:
                 list(pool.map(fetch_one, missing))
+            for symbol in symbols:
+                if symbol in GOLD_SYMBOLS:
+                    try:
+                        quote = fetch_derived_gold_quote(symbol)
+                    except Exception:
+                        quote = None
+                    if quote:
+                        result[symbol] = quote
+                    elif symbol not in result and symbol in DEFAULT_PRICES:
+                        fallback = moving_fallback_price(DEFAULT_PRICES[symbol], symbol)
+                        price = fallback['price']
+                        prev = fallback['prev']
+                        change = round(price - prev, 2)
+                        result[symbol] = {
+                            'symbol': symbol, 'price': price,
+                            'change': change,
+                            'changePct': round((change / (prev or price)) * 100, 2),
+                            'volume': 0, 'high': price, 'low': price, 'open': price, 'close': prev,
+                            'week52High': 0, 'week52Low': 0, 'marketCap': 0,
+                        }
             return json_response(self, 200, result)
         if parsed.path == '/api/history':
             query = urllib.parse.parse_qs(parsed.query)
