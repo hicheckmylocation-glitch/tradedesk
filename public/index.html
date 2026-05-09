@@ -1243,25 +1243,29 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
-  // Pivot Points — Kite style: per-session lines spanning only within each day
-  if(pivotSessions.length > 0) {
-    pivotSessions.forEach(({levels, startIdx, endIdx}) => {
-      const startX = px(startIdx);
-      const endX   = Math.min(px(endIdx) + candleW, W - PAD.right);
-      if(startX >= endX) return;
-      levels.forEach(({v,c,l}) => {
+  // Pivot Points — Zerodha style: span full chart width with labels on right
+  if(pivotSessions.length > 0 && chartState.indicators.pivots) {
+    const latestSession = pivotSessions[pivotSessions.length - 1];
+    if(latestSession && latestSession.levels) {
+      latestSession.levels.forEach(({v, c, l}) => {
         const y = py(v);
         if(y < PAD.top || y > PAD.top + chartH) return;
-        ctx.setLineDash([4,3]); ctx.strokeStyle = c; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(startX, y); ctx.lineTo(endX, y); ctx.stroke();
+        // Draw line across entire chart
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = c;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(PAD.left, y);
+        ctx.lineTo(W - PAD.right, y);
+        ctx.stroke();
         ctx.setLineDash([]);
-        // Label at the start of the session line, above the line
-        ctx.font = 'bold 8px JetBrains Mono';
+        // Label on the right side
+        ctx.font = 'bold 10px JetBrains Mono';
         ctx.fillStyle = c;
         ctx.textAlign = 'left';
-        ctx.fillText(l, startX + 3, y - 2);
+        ctx.fillText(l, W - PAD.right + 8, y + 4);
       });
-    });
+    }
   }
 
   // Candles
