@@ -1243,36 +1243,32 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
-  // Pivot Points — Zerodha style: per-session, label on right of each session
+  // Pivot Points — Traditional: each day's pivots span only that day's candles
   if(pivotSessions.length > 0 && chartState.indicators.pivots) {
-    const lastSessionIdx = pivotSessions.length - 1;
-    pivotSessions.forEach(({levels, startIdx, endIdx}, si) => {
-      const startX = px(startIdx - startIdx + startIdx); // use px normally
-      const isLastSession = si === lastSessionIdx;
-      // Last session extends to right edge; historical sessions end at their last candle
-      const endX = isLastSession ? (W - PAD.right) : Math.min(px(endIdx) + candleW/2, W - PAD.right);
-      const lineStartX = Math.max(PAD.left, px(startIdx) - candleW/2);
-      if(lineStartX >= endX) return;
+    pivotSessions.forEach(({levels, startIdx, endIdx}) => {
+      const startX = px(startIdx);
+      const endX = Math.min(px(endIdx) + candleW, W - PAD.right);
+      if(startX >= endX || startX < 0) return;
+      
       levels.forEach(({v, c, l}) => {
         const y = py(v);
         if(y < PAD.top || y > PAD.top + chartH) return;
+        
+        // Draw dashed line only within this day's range
         ctx.setLineDash([4, 3]);
         ctx.strokeStyle = c;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(lineStartX, y);
+        ctx.moveTo(Math.max(PAD.left, startX), y);
         ctx.lineTo(endX, y);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Label on right edge of this session
-        ctx.font = 'bold 9px JetBrains Mono';
+        
+        // Label at the start of the day's pivot line
+        ctx.font = 'bold 8px JetBrains Mono';
         ctx.fillStyle = c;
         ctx.textAlign = 'left';
-        if(isLastSession) {
-          ctx.fillText(l, W - PAD.right + 4, y + 4);
-        } else {
-          ctx.fillText(l, endX - 22, y - 2);
-        }
+        ctx.fillText(l, Math.max(PAD.left + 2, startX + 3), y - 2);
       });
     });
   }
