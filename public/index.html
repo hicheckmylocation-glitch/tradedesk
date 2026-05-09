@@ -1243,29 +1243,38 @@ function drawChart() {
   // VWAP
   if(chartState.indicators.vwap) drawLineOnCtx(ctx,vwap,px,py,'#e040fb',2);
 
-  // Pivot Points — Zerodha style: span full chart width with labels on right
+  // Pivot Points — Zerodha style: per-session, label on right of each session
   if(pivotSessions.length > 0 && chartState.indicators.pivots) {
-    const latestSession = pivotSessions[pivotSessions.length - 1];
-    if(latestSession && latestSession.levels) {
-      latestSession.levels.forEach(({v, c, l}) => {
+    const lastSessionIdx = pivotSessions.length - 1;
+    pivotSessions.forEach(({levels, startIdx, endIdx}, si) => {
+      const startX = px(startIdx - startIdx + startIdx); // use px normally
+      const isLastSession = si === lastSessionIdx;
+      // Last session extends to right edge; historical sessions end at their last candle
+      const endX = isLastSession ? (W - PAD.right) : Math.min(px(endIdx) + candleW/2, W - PAD.right);
+      const lineStartX = Math.max(PAD.left, px(startIdx) - candleW/2);
+      if(lineStartX >= endX) return;
+      levels.forEach(({v, c, l}) => {
         const y = py(v);
         if(y < PAD.top || y > PAD.top + chartH) return;
-        // Draw line across entire chart
         ctx.setLineDash([4, 3]);
         ctx.strokeStyle = c;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(PAD.left, y);
-        ctx.lineTo(W - PAD.right, y);
+        ctx.moveTo(lineStartX, y);
+        ctx.lineTo(endX, y);
         ctx.stroke();
         ctx.setLineDash([]);
-        // Label on the right side
-        ctx.font = 'bold 10px JetBrains Mono';
+        // Label on right edge of this session
+        ctx.font = 'bold 9px JetBrains Mono';
         ctx.fillStyle = c;
         ctx.textAlign = 'left';
-        ctx.fillText(l, W - PAD.right + 8, y + 4);
+        if(isLastSession) {
+          ctx.fillText(l, W - PAD.right + 4, y + 4);
+        } else {
+          ctx.fillText(l, endX - 22, y - 2);
+        }
       });
-    }
+    });
   }
 
   // Candles
