@@ -11,6 +11,8 @@ const DEFAULT_STATE = {
   scannerRisk: 5000,
   scannerLog: [],
   scannerTraded: {},
+  scannerCursor: 0,
+  scannerLastRun: 0,
   updatedAt: 0,
 };
 
@@ -41,6 +43,8 @@ function sanitizeState(payload) {
     scannerRisk: Number(payload?.scannerRisk) || DEFAULT_STATE.scannerRisk,
     scannerLog: Array.isArray(payload?.scannerLog) ? payload.scannerLog : [],
     scannerTraded: payload?.scannerTraded && typeof payload.scannerTraded === 'object' ? payload.scannerTraded : {},
+    scannerCursor: Number(payload?.scannerCursor) || 0,
+    scannerLastRun: Number(payload?.scannerLastRun) || 0,
     updatedAt: Number(payload?.updatedAt) || Date.now(),
   };
 }
