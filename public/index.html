@@ -288,6 +288,7 @@ canvas{width:100%;height:100px;}
       <button class="tab-btn" onclick="setTab('chart',this)">📈 Chart</button>
       <button class="tab-btn" onclick="setTab('options',this)">F&O Options</button>
       <button class="tab-btn" onclick="setTab('portfolio',this)">Portfolio <span class="tab-badge" id="badge-portfolio">0</span></button>
+      <button class="tab-btn" onclick="setTab('pnl',this)">P&L</button>
       <button class="tab-btn" onclick="setTab('orders',this)">Orders <span class="tab-badge" id="badge-orders">0</span></button>
       <button class="tab-btn" onclick="setTab('scanner',this)">🤖 Auto Scan</button>
     </div>
@@ -318,6 +319,8 @@ let state = {
   scannerRisk: 5000,
   scannerLog: [],
   scannerTraded: {},
+  scannerCursor: 0,
+  scannerLastRun: 0,
   updatedAt: 0,
 };
 
@@ -336,6 +339,8 @@ function serializeState(updatedAt) {
     scannerRisk: state.scannerRisk,
     scannerLog: state.scannerLog,
     scannerTraded: state.scannerTraded,
+    scannerCursor: state.scannerCursor,
+    scannerLastRun: state.scannerLastRun,
     updatedAt: updatedAt || state.updatedAt || 0,
   };
 }
@@ -350,6 +355,8 @@ function hydrateState(saved) {
   state.scannerRisk = Number(saved.scannerRisk) || 5000;
   state.scannerLog = Array.isArray(saved.scannerLog) ? saved.scannerLog : [];
   state.scannerTraded = saved.scannerTraded || {};
+  state.scannerCursor = Number(saved.scannerCursor) || 0;
+  state.scannerLastRun = Number(saved.scannerLastRun) || 0;
   state.updatedAt = Number(saved.updatedAt) || state.updatedAt || 0;
   return true;
 }
@@ -426,7 +433,7 @@ async function syncSharedState(forceRender) {
       persistLocalState(remote);
       updateBadges();
       updateHeader();
-      if (forceRender || state.tab === 'portfolio' || state.tab === 'orders' || state.tab === 'scanner' || state.tab === 'market') {
+      if (forceRender || state.tab === 'portfolio' || state.tab === 'pnl' || state.tab === 'orders' || state.tab === 'scanner' || state.tab === 'market') {
         renderContent();
       }
       ensureScannerPrimed();
@@ -533,6 +540,7 @@ async function refreshPrices() {
     updateHeader();
     if(state.selected && state.tab === 'market') renderMarket();
     if(state.tab === 'portfolio') renderPortfolio();
+    if(state.tab === 'pnl') renderPnl();
     runScanner();
   } catch(e) {
     console.error('refreshPrices failed:', e);
@@ -634,6 +642,7 @@ function setTab(tab, btn) {
 function renderContent() {
   document.getElementById('content').classList.remove('chart-active');
   if(state.tab==='portfolio'){renderPortfolio();return;}
+  if(state.tab==='pnl'){renderPnl();return;}
   if(state.tab==='orders'){renderOrders();return;}
   if(state.tab==='scanner'){renderScanner();return;}
   if(!state.selected){
@@ -913,9 +922,10 @@ function renderChartTab() {
 async function fetchAndDrawChart(sym) {
   const statusEl = document.getElementById('ct-fetch-status');
   if(statusEl) statusEl.textContent = '⟳ Fetching...';
+  const shouldUseChartCache = !['GOLD', 'GOLDM', 'GOLDPETAL'].includes(sym);
 
   // Check if we already have cached real candles for this symbol in this session
-  if(state.stocks[sym]._chartCandles && state.stocks[sym]._chartCandles.length > 10) {
+  if(shouldUseChartCache && state.stocks[sym]._chartCandles && state.stocks[sym]._chartCandles.length > 10) {
     chartState._candles = state.stocks[sym]._chartCandles;
     chartState._noMoreHistory = false;
     chartState._loadingMore = false;
@@ -1101,18 +1111,22 @@ function drawChart() {
   const baseVisible = Math.round((TF_CANDLES[chartState.timeframe]||60) / chartState.zoom);
   const visibleCount = Math.min(baseVisible, allCandles.length);
   chartState._visibleCandles = visibleCount;
-  // Allow panning 100% beyond the last candle for dragging space (matches TradingView/Zerodha)
-  const maxPan = Math.max(0, allCandles.length - visibleCount + Math.floor(visibleCount * 1.0));
-  chartState.panOffset = Math.min(Math.max(0, chartState.panOffset), maxPan);
+  const futureSlotsLimit = Math.max(12, Math.floor(visibleCount * 0.45));
+  const minPan = -futureSlotsLimit;
+  const maxPan = Math.max(0, allCandles.length - visibleCount);
+  chartState.panOffset = Math.min(Math.max(minPan, chartState.panOffset), maxPan);
 
   // Lazy-load older candles when user pans to the left edge
-  if(chartState.panOffset >= maxPan - 5 && !chartState._loadingMore && !chartState._noMoreHistory) {
+  if(maxPan > 0 && chartState.panOffset >= maxPan - 5 && !chartState._loadingMore && !chartState._noMoreHistory) {
     loadMoreHistory();
   }
 
   const endIdx = allCandles.length - chartState.panOffset;
-  const startIdx = Math.max(0, endIdx - visibleCount);
-  const candles = allCandles.slice(startIdx, endIdx);
+  const futureSlots = Math.max(0, endIdx - allCandles.length);
+  const actualEndIdx = Math.min(allCandles.length, endIdx);
+  const actualVisibleCount = Math.max(2, visibleCount - futureSlots);
+  const startIdx = Math.max(0, actualEndIdx - actualVisibleCount);
+  const candles = allCandles.slice(startIdx, actualEndIdx);
   if(candles.length < 2) return;
 
   chartState._startIdx = startIdx;
@@ -1171,12 +1185,13 @@ function drawChart() {
   const pMax = pMid + pHalf;
   const pRange = pMax-pMin||1;
 
-  const px = i => PAD.left + (i/(candles.length-1||1))*chartW;
+  const slotCount = Math.max(2, candles.length + futureSlots);
+  const px = i => PAD.left + (i/(slotCount-1||1))*chartW;
   const py = v => PAD.top + (1-(v-pMin)/pRange)*chartH;
-  const candleW = Math.max(3, Math.min(24, (chartW/candles.length)*0.75));
+  const candleW = Math.max(3, Math.min(24, (chartW/slotCount)*0.75));
 
   // Save snapshot for crosshair
-  chartState._snap = {candles, PAD, W, mainH, chartH, pMin, pMax, pRange, px, py, candleW, ema20, ema50, ema100, ema200, vwap, rsiVals};
+  chartState._snap = {candles, PAD, W, mainH, chartH, pMin, pMax, pRange, px, py, candleW, slotCount, ema20, ema50, ema100, ema200, vwap, rsiVals};
 
   const ctx = mainCanvas.getContext('2d');
   ctx.fillStyle = '#0a0b0e'; ctx.fillRect(0,0,W,mainH);
@@ -1440,7 +1455,7 @@ function setupChartInteraction() {
     if(e.touches.length === 1 && dragging) {
       const canvas = document.getElementById('mainChart'); if(!canvas) return;
       const cw = (canvas.width - 70) / Math.max(1, chartState._visibleCandles || 50);
-      chartState.panOffset = Math.max(0, Math.round(dragStartPan - (dragStartX - e.touches[0].clientX) / cw));
+      chartState.panOffset = Math.round(dragStartPan - (dragStartX - e.touches[0].clientX) / cw);
       const sn = chartState._snap;
       if(sn && sn.pRange) {
         const pxPerPrice = sn.chartH / sn.pRange;
@@ -1489,7 +1504,7 @@ function setupChartInteraction() {
       const canvas=document.getElementById('mainChart');
       if(!canvas) return;
       const cw=(canvas.width-70)/Math.max(1,chartState._visibleCandles||50);
-      chartState.panOffset=Math.max(0,Math.round(dragStartPan-(dragStartX-e.clientX)/cw));
+      chartState.panOffset=Math.round(dragStartPan-(dragStartX-e.clientX)/cw);
       // Vertical drag → shift price view up/down
       const sn = chartState._snap;
       if(sn && sn.pRange) {
@@ -1571,13 +1586,13 @@ function setupChartResize() {
 
 function showCrosshair(e, wrap) {
   const sn = chartState._snap; if(!sn) return;
-  const {candles,PAD,W,mainH,chartH,pMin,pRange,px,py,candleW} = sn;
+  const {candles,PAD,W,mainH,chartH,pMin,pRange,px,py,candleW,slotCount} = sn;
   const rect = wrap.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
   if(my > mainH) return;
 
-  const idx = Math.max(0,Math.min(candles.length-1, Math.round((mx-PAD.left)/((W-PAD.left-PAD.right)/(candles.length-1||1)))));
+  const idx = Math.max(0,Math.min(candles.length-1, Math.round((mx-PAD.left)/((W-PAD.left-PAD.right)/((slotCount || candles.length)-1||1)))));
   const c = candles[idx]; if(!c) return;
 
   // Redraw and overlay crosshair
@@ -1829,7 +1844,7 @@ function execFutures(sym, side, expiry, price) {
   if(margin > state.cash) { notify(`Need ₹${fn(margin)} margin, have ₹${fn(state.cash)}`, 'error'); return; }
   state.cash -= margin;
   addHolding({ symbol: sym, type: 'EQUITY', qty, avgPrice: price, marginUsed: margin, leverage: 10, futuresExpiry: expiry });
-  addOrder({ symbol: sym, side, qty, price, total, desc: `${label} · 10x · Margin ₹${fn(margin)}` });
+  addOrder({ symbol: sym, side, qty, price, total, charges: 0, realizedPnl: 0, desc: `${label} · 10x · Margin ₹${fn(margin)}` });
   notify(`✓ ${side} ${qty}× ${label} @ ₹${fn(price)} | Margin ₹${fn(margin)}`, 'success');
   closeModal(); updateHeader(); save(); updateBadges();
 }
@@ -2037,6 +2052,144 @@ function renderPortfolio() {
 }
 
 // ── ORDERS ──────────────────────────────────────────────────────────────────
+function tradeDayKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function todayOrders() {
+  const today = tradeDayKey();
+  return state.orders.filter(o => o.tradeDate === today || (o.timestamp && tradeDayKey(o.timestamp) === today));
+}
+
+function orderDayKey(o) {
+  if (o.tradeDate) return o.tradeDate;
+  if (o.timestamp) return tradeDayKey(o.timestamp);
+  return 'unknown';
+}
+
+function formatTradeDate(dayKey) {
+  if (dayKey === 'unknown') return 'Older orders';
+  const [y, m, d] = dayKey.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function ordersForDay(dayKey) {
+  return state.orders.filter(o => orderDayKey(o) === dayKey);
+}
+
+function holdingPnl(h) {
+  const curr = h.type === 'EQUITY' ? (state.stocks[h.symbol]?.price || h.avgPrice) : (h.currentPremium || h.avgPrice);
+  return {
+    curr,
+    value: curr * h.qty,
+    pnl: (curr - h.avgPrice) * h.qty,
+    pct: h.avgPrice ? ((curr - h.avgPrice) / h.avgPrice) * 100 : 0,
+  };
+}
+
+function getPnlSummary(dayKey = tradeDayKey()) {
+  const orders = ordersForDay(dayKey);
+  const pnlOrders = orders.filter(o => o.pnlAffectsDay !== false);
+  const isToday = dayKey === tradeDayKey();
+  const holdings = isToday ? Object.values(state.portfolio) : [];
+  const realizedPnl = pnlOrders.reduce((sum, o) => sum + (Number(o.realizedPnl) || 0), 0);
+  const charges = pnlOrders.reduce((sum, o) => sum + (Number(o.charges) || 0), 0);
+  const entryCharges = pnlOrders.filter(o => o.side === 'BUY').reduce((sum, o) => sum + (Number(o.charges) || 0), 0);
+  const buyValue = orders.filter(o => o.side === 'BUY').reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+  const sellValue = orders.filter(o => o.side === 'SELL').reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+  const openPnl = holdings.reduce((sum, h) => sum + holdingPnl(h).pnl, 0);
+  return { dayKey, orders, holdings, realizedPnl, charges, buyValue, sellValue, openPnl, netPnl: realizedPnl + openPnl - entryCharges, isToday };
+}
+
+function getDailyPnlSummaries() {
+  const days = [...new Set(state.orders.map(orderDayKey))]
+    .sort((a, b) => {
+      if (a === 'unknown') return 1;
+      if (b === 'unknown') return -1;
+      return b.localeCompare(a);
+    });
+  if (!days.includes(tradeDayKey())) days.unshift(tradeDayKey());
+  return days.map(day => getPnlSummary(day));
+}
+
+function renderPnl(selectedDay) {
+  updateOptionPremiums();
+  const dayOptions = getDailyPnlSummaries();
+  const selectedKey = selectedDay || tradeDayKey();
+  const s = getPnlSummary(selectedKey);
+  const verdict = s.netPnl > 0 ? 'PROFIT' : s.netPnl < 0 ? 'LOSS' : 'FLAT';
+  const verdictClass = s.netPnl > 0 ? 'pos' : s.netPnl < 0 ? 'neg' : 'neu';
+  const dailyRows = dayOptions.map(day => {
+    const cls = day.netPnl >= 0 ? 'pos' : 'neg';
+    const isActive = day.dayKey === selectedKey;
+    return `<tr style="${isActive ? 'background:rgba(245,166,35,0.08)' : ''}">
+      <td><button class="sell-small-btn" style="color:var(--amber);border-color:rgba(245,166,35,0.35);background:rgba(245,166,35,0.08)" onclick="renderPnl('${day.dayKey}')">${formatTradeDate(day.dayKey)}</button></td>
+      <td>${day.orders.length}</td>
+      <td>&#8377;${fn(day.buyValue)}</td>
+      <td>&#8377;${fn(day.sellValue)}</td>
+      <td>&#8377;${fn(day.charges)}</td>
+      <td class="${cls}">${day.netPnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(day.netPnl))}</td>
+      <td>${day.netPnl > 0 ? 'Profit' : day.netPnl < 0 ? 'Loss' : 'Flat'}</td>
+    </tr>`;
+  }).join('');
+  const closedRows = s.orders
+    .filter(o => o.pnlAffectsDay !== false && (o.side === 'SELL' || Number(o.realizedPnl)))
+    .map(o => {
+      const pnl = Number(o.realizedPnl) || 0;
+      const cls = pnl >= 0 ? 'pos' : 'neg';
+      return `<tr>
+        <td><span class="holding-symbol">${o.symbol}</span></td>
+        <td>${o.qty || 0}</td>
+        <td>&#8377;${fn(o.price || 0)}</td>
+        <td>&#8377;${fn(o.total || 0)}</td>
+        <td class="${cls}">${pnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(pnl))}</td>
+        <td>&#8377;${fn(o.charges || 0)}</td>
+        <td>${o.time || ''}</td>
+      </tr>`;
+    }).join('');
+  const openRows = s.holdings.map(h => {
+    const p = holdingPnl(h);
+    const cls = p.pnl >= 0 ? 'pos' : 'neg';
+    const tl = h.type === 'EQUITY' ? 'EQ' : h.type === 'CALL' ? 'CE' : 'PE';
+    return `<tr>
+      <td><span class="holding-symbol">${h.symbol}</span></td>
+      <td>${tl}</td>
+      <td>${h.qty}</td>
+      <td>&#8377;${fn(h.avgPrice)}</td>
+      <td>&#8377;${fn(p.curr)}</td>
+      <td>&#8377;${fn(p.value)}</td>
+      <td class="${cls}">${p.pnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(p.pnl))}<br><span style="font-size:10px">${p.pnl >= 0 ? '+' : '-'}${Math.abs(p.pct).toFixed(2)}%</span></td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="portfolio-header">
+      <div class="pf-card"><div class="pf-card-label">${s.isToday ? 'Today' : formatTradeDate(s.dayKey)} Net P&L</div><div class="pf-card-val ${verdictClass}">${s.netPnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(s.netPnl))}</div><div class="pf-card-sub">You are in ${verdict.toLowerCase()} ${s.isToday ? 'today' : 'on this day'}</div></div>
+      <div class="pf-card"><div class="pf-card-label">Realized P&L</div><div class="pf-card-val ${s.realizedPnl >= 0 ? 'pos' : 'neg'}">${s.realizedPnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(s.realizedPnl))}</div><div class="pf-card-sub">Closed trades for selected day</div></div>
+      <div class="pf-card"><div class="pf-card-label">Open P&L</div><div class="pf-card-val ${s.openPnl >= 0 ? 'pos' : 'neg'}">${s.openPnl >= 0 ? '+' : '-'}&#8377;${fn(Math.abs(s.openPnl))}</div><div class="pf-card-sub">${s.isToday ? 'Live holdings mark-to-market' : 'Shown only for today'}</div></div>
+    </div>
+    <div class="stats-grid" style="margin-bottom:20px">
+      <div class="stat-card"><div class="stat-label">Buy Value</div><div class="stat-val">&#8377;${fn(s.buyValue)}</div></div>
+      <div class="stat-card"><div class="stat-label">Sell Value</div><div class="stat-val">&#8377;${fn(s.sellValue)}</div></div>
+      <div class="stat-card"><div class="stat-label">Charges</div><div class="stat-val neg">&#8377;${fn(s.charges)}</div></div>
+      <div class="stat-card"><div class="stat-label">Orders</div><div class="stat-val">${s.orders.length}</div></div>
+    </div>
+    <div style="border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:16px;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--amber2)">Date-wise P&L</div>
+    ${dailyRows ? `<table class="holdings-table"><thead><tr><th>Date</th><th>Orders</th><th>Buy Value</th><th>Sell Value</th><th>Charges</th><th>Net P&L</th><th>Status</th></tr></thead><tbody>${dailyRows}</tbody></table>` : `<div class="empty-state"><div class="empty-icon">P&L</div><div style="font-size:16px;margin-bottom:8px;color:var(--dim)">No P&L history yet</div></div>`}
+    <div style="border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:16px;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--amber2)">Open Position P&L</div>
+    ${s.holdings.length ? `<table class="holdings-table"><thead><tr><th>Symbol</th><th>Type</th><th>Qty</th><th>Avg Cost</th><th>CMP</th><th>Value</th><th>P&L</th></tr></thead><tbody>${openRows}</tbody></table>` : `<div class="empty-state"><div class="empty-icon">P&L</div><div style="font-size:16px;margin-bottom:8px;color:var(--dim)">No open positions</div></div>`}
+    <div style="border-bottom:1px solid var(--border);padding:20px 0 12px;margin-bottom:16px;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:var(--amber2)">Closed Trades - ${formatTradeDate(s.dayKey)}</div>
+    ${closedRows ? `<table class="holdings-table"><thead><tr><th>Symbol</th><th>Qty</th><th>Exit Price</th><th>Sell Value</th><th>Realized P&L</th><th>Charges</th><th>Time</th></tr></thead><tbody>${closedRows}</tbody></table>` : `<div class="empty-state"><div class="empty-icon">P&L</div><div style="font-size:16px;margin-bottom:8px;color:var(--dim)">No closed trades for this day</div></div>`}`;
+}
+
 function renderOrders() {
   if(!state.orders.length){
     document.getElementById('content').innerHTML=`<div class="empty-state"><div class="empty-icon">📋</div><div style="font-size:16px;margin-bottom:8px;color:var(--dim)">No orders yet</div></div>`;
@@ -2074,7 +2227,7 @@ function execEq(sym, side) {
     if(cashBlocked>state.cash){ notify(`Need ₹${fn(cashBlocked)} margin+charges, have ₹${fn(state.cash)}`,'error'); return; }
     state.cash -= cashBlocked;
     addHolding({symbol:sym,type:'EQUITY',qty,avgPrice:price,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
-    addOrder({symbol:sym,side:'BUY',qty,price,total:turnover,desc:`Equity · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · Charges ₹${fn(fee.charges)}`});
+    addOrder({symbol:sym,side:'BUY',qty,price,total:turnover,charges:fee.charges,realizedPnl:0,desc:`Equity · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · Charges ₹${fn(fee.charges)}`});
     notify(`✓ Bought ${qty} × ${sym} @ ₹${fn(price)} | Exposure ₹${fn(turnover)} | Margin ₹${fn(marginRequired)}`,'success');
   } else {
     const preview = previewEquityClose(sym, qty, price);
@@ -2082,7 +2235,7 @@ function execEq(sym, side) {
     applyEquityClose(sym, qty);
     const cashCredit = preview.marginReleased + preview.realizedPnl - fee.charges;
     state.cash += cashCredit;
-    addOrder({symbol:sym,side:'SELL',qty,price,total:turnover,desc:`Equity exit · Margin ₹${fn(preview.marginReleased)} · P&L ${preview.realizedPnl>=0?'+':''}₹${fn(preview.realizedPnl)} · Charges ₹${fn(fee.charges)}`});
+    addOrder({symbol:sym,side:'SELL',qty,price,total:turnover,charges:fee.charges,realizedPnl:preview.realizedPnl - fee.charges,grossPnl:preview.realizedPnl,desc:`Equity exit · Margin ₹${fn(preview.marginReleased)} · P&L ${preview.realizedPnl>=0?'+':''}₹${fn(preview.realizedPnl)} · Charges ₹${fn(fee.charges)}`});
     notify(`✓ Sold ${qty} × ${sym} @ ₹${fn(price)} | Realized ${preview.realizedPnl>=0?'+':''}₹${fn(preview.realizedPnl)}`,'success');
   }
   updateHeader(); save(); renderContent();
@@ -2096,11 +2249,11 @@ function execOpt(sym, optType, strike, expiry, premium, side) {
     if(total>state.cash){ notify(`Need ₹${fn(total)}`,'error'); return; }
     state.cash -= total;
     addHolding({symbol:sym,type:optType,qty,avgPrice:premium,strike,expiry,optionType:optType,currentPremium:premium});
-    addOrder({symbol:sym,side:'BUY',qty,price:premium,total,desc:label});
+    addOrder({symbol:sym,side:'BUY',qty,price:premium,total,charges:0,realizedPnl:0,desc:label});
     notify(`✓ Bought ${qty} × ${label}`,'success');
   } else {
     state.cash += total*0.9;
-    addOrder({symbol:sym,side:'SELL',qty,price:premium,total:total*0.9,desc:`SHORT ${label}`});
+    addOrder({symbol:sym,side:'SELL',qty,price:premium,total:total*0.9,charges:0,realizedPnl:0,pnlAffectsDay:false,desc:`SHORT ${label}`});
     notify(`✓ Shorted ${label}`,'success');
   }
   closeModal(); updateHeader(); save(); updateBadges();
@@ -2115,10 +2268,10 @@ function quickSell(id) {
     const fee = getEquityCharges(total, false);
     const marginReleased = h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE));
     state.cash += marginReleased + pnl - fee.charges;
-    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,desc:`Equity exit · Margin ₹${fn(marginReleased)} · Charges ₹${fn(fee.charges)}`});
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,charges:fee.charges,realizedPnl:pnl - fee.charges,grossPnl:pnl,desc:`Equity exit · Margin ₹${fn(marginReleased)} · Charges ₹${fn(fee.charges)}`});
   } else {
     state.cash += total;
-    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,desc:`${h.symbol} ${h.strike} ${h.type} ${h.expiry}`});
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total,charges:0,realizedPnl:pnl,grossPnl:pnl,desc:`${h.symbol} ${h.strike} ${h.type} ${h.expiry}`});
   }
   notify(`✓ Sold ${h.symbol} | P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`, pnl>=0?'success':'error');
   delete state.portfolio[id];
@@ -2176,7 +2329,17 @@ function addHolding(d){
   updateBadges();
 }
 function removeHolding(id,qty){ const h=state.portfolio[id]; if(!h) return; h.qty-=qty; if(h.qty<=0) delete state.portfolio[id]; updateBadges(); }
-function addOrder(d){ state.orders.push({...d,time:new Date().toLocaleTimeString('en-IN',{hour12:true}),id:state.nextId++}); updateBadges(); }
+function addOrder(d){
+  const timestamp = Date.now();
+  state.orders.push({
+    ...d,
+    timestamp,
+    tradeDate: tradeDayKey(timestamp),
+    time: new Date(timestamp).toLocaleTimeString('en-IN',{hour12:true}),
+    id: state.nextId++,
+  });
+  updateBadges();
+}
 function updateBadges(){
   document.getElementById('badge-portfolio').textContent=Object.keys(state.portfolio).length;
   document.getElementById('badge-orders').textContent=state.orders.length;
@@ -2329,7 +2492,7 @@ function runScanner() {
     const fee = getEquityCharges(exitValue, false);
     const marginReleased = h.marginUsed || ((h.avgPrice * h.qty) / (h.leverage || EQUITY_LEVERAGE));
     state.cash += marginReleased + pnl - fee.charges;
-    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total:exitValue,
+    addOrder({symbol:h.symbol,side:'SELL',qty:h.qty,price:curr,total:exitValue,charges:fee.charges,realizedPnl:pnl - fee.charges,grossPnl:pnl,
       desc:`\ud83e\udd16 AUTO EXIT (${hitTarget?'TARGET HIT':'SL HIT'}) · Margin ₹${fn(marginReleased)} · P&L: ${pnl>=0?'+':''}₹${fn(pnl)} · Charges ₹${fn(fee.charges)}`});
     const sig=state.scannerLog.find(s=>s.sym===h.symbol&&s.status==='EXECUTED');
     if(sig){sig.status=hitTarget?'\u2705 TARGET':'\u274c SL HIT';sig.pnl=pnl;}
@@ -2377,7 +2540,7 @@ function runScanner() {
       if(marginRequired<=state.cash){
         state.cash-=marginRequired;
         addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
-        addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,
+        addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,charges:0,realizedPnl:0,
           desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191${emaNote} · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
         sig.status='EXECUTED';
         notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | Margin ₹${fn(marginRequired)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
@@ -2395,7 +2558,8 @@ function toggleScanner() {
   state.scannerOn=!state.scannerOn; save();
   if(state.scannerOn){
     Object.keys(state.stocks).forEach(sym=>{ if(!state.stocks[sym].scanHistory) state.stocks[sym].scanHistory=[]; });
-    notify('\ud83e\udd16 Auto Scanner ON — fetching 5m candle data...','success');
+    setTimeout(() => fetch('/api/cron-scanner?manual=1', { cache: 'no-store' }).catch(()=>{}), 1200);
+    notify('\ud83e\udd16 Auto Scanner ON — browser + server scanner started','success');
     primeScanner().then(()=>{
       notify('\ud83e\udd16 Scanner ready — watching for EMA20\u00d7EMA50 crossovers','success');
       if(state.tab==='scanner') renderScanner();
@@ -2412,6 +2576,7 @@ function renderScanner() {
   const wins=state.scannerLog.filter(s=>s.status&&s.status.includes('TARGET')).length;
   const losses=state.scannerLog.filter(s=>s.status&&s.status.includes('SL')).length;
   const activeTrades=Object.values(state.portfolio).filter(h=>h.type==='EQUITY'&&h.sl).length;
+  const lastServerRun = state.scannerLastRun ? new Date(state.scannerLastRun).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}) : '—';
 
   const activeRows=Object.entries(state.portfolio).filter(([,h])=>h.type==='EQUITY'&&h.sl).map(([id,h])=>{
     const curr=state.stocks[h.symbol]?.price||h.avgPrice;
@@ -2467,7 +2632,7 @@ function renderScanner() {
         <div class="stat-card" style="text-align:center;"><div class="stat-label">Primed Stocks</div><div class="stat-val">${primedCount}<span style="color:var(--muted);font-size:11px;"> / ${totalStocks}</span></div></div>
         <div class="stat-card" style="text-align:center;"><div class="stat-label">Signals</div><div class="stat-val" style="color:var(--amber);">${state.scannerLog.length}</div></div>
         <div class="stat-card" style="text-align:center;"><div class="stat-label">Wins / Losses</div><div class="stat-val"><span style="color:#00e676;">${wins}</span> / <span style="color:#ff4444;">${losses}</span></div></div>
-        <div class="stat-card" style="text-align:center;"><div class="stat-label">Open Positions</div><div class="stat-val" style="color:var(--amber);">${activeTrades}</div></div>
+        <div class="stat-card" style="text-align:center;"><div class="stat-label">Open / Server</div><div class="stat-val" style="color:var(--amber);">${activeTrades}<span style="color:var(--muted);font-size:10px;"> · ${lastServerRun}</span></div></div>
       </div>
 
       <!-- Config -->
@@ -2492,7 +2657,8 @@ function renderScanner() {
           <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 <b>AND EMA100 + EMA200 are both rising with a visible gap</b> \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), 5x leverage margin, SL at 5-candle low, Target at 1:1 RR<br>
           <b style="color:var(--amber2);">\u26a0 FILTERED:</b> EMA20\u00d7EMA50 crossover detected but EMA100/200 are mixed, flat, or overlapping \u2192 logged as SKIPPED, no trade<br>
           <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 with EMA100 + EMA200 both falling \u2192 Shown in log, no short in paper mode<br>
-          <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target
+          <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target<br>
+          <b style="color:var(--amber2);">SERVER MODE:</b> When deployed on Vercel, cron keeps scanning in batches even if this page is closed.
         </div>
       </div>
 
