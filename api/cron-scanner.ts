@@ -1,9 +1,10 @@
 const https = require('https');
 const fs = require('fs/promises');
 const path = require('path');
-const { QUOTE_SYMBOLS } = require('./_stockUniverse');
+const { QUOTE_SYMBOLS, STOCKS } = require('./_stockUniverse');
+const { fetchGoldpetalAuthorizedQuote } = require('./_goldpetalFeed');
 
-const KEY = 'td:shared-state';
+const KEY_PREFIX = 'td:shared-state';
 const EQUITY_LEVERAGE = 5;
 const SCAN_BATCH_SIZE = 45;
 
@@ -11,11 +12,11 @@ const SCAN_BATCH_SIZE = 45;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || 'YOUR_FINNHUB_FREE_API_KEY';
 const FINNHUB_BASE = 'https://finnhub.io/api/v1';
 
-// ── NSE Commodity API: Free real-time commodity data (GOLDPETAL, etc.) ──
-const NSE_BASE = 'https://www.nseindia.com';
-
-// ── Symbols that need NSE commodity handling ──
+// MCX no-delay data needs an authorized broker/vendor feed. GOLDPETAL_LTP_URL
+// can point at that feed; otherwise GOLDPETAL uses an indicative COMEX+USD/INR
+// derivation so it never silently scans at zero.
 const COMMODITY_SYMBOLS = new Set(['GOLDPETAL']);
+const DEFAULT_PRICES = Object.fromEntries(STOCKS.filter((s: any) => s.defaultPrice).map((s: any) => [s.symbol, s.defaultPrice]));
 
 const DEFAULT_STATE: any = {
   cash: 1000000,
@@ -30,6 +31,15 @@ const DEFAULT_STATE: any = {
   scannerLastRun: 0,
   updatedAt: 0,
 };
+
+function cleanProfileId(value: any) {
+  const id = String(value || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+  return id || 'default';
+}
+
+function getStateKey(profileId: any) {
+  return `${KEY_PREFIX}:${cleanProfileId(profileId)}`;
+}
 
 function sanitize(p: any) {
   return {
@@ -47,25 +57,26 @@ function sanitize(p: any) {
   };
 }
 
-function getFilePath() {
-  return process.env.VERCEL ? path.join('/tmp', 'tradedesk-state.json') : path.join(process.cwd(), 'data', 'td_state.json');
+function getFilePath(profileId = 'default') {
+  const safeId = cleanProfileId(profileId);
+  return process.env.VERCEL ? path.join('/tmp', `tradedesk-state-${safeId}.json`) : path.join(process.cwd(), 'data', `td_state_${safeId}.json`);
 }
 
-async function kvRead() {
+async function kvRead(profileId: any) {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
   if (!url || !token) return null;
-  const r = await fetch(`${url}/get/${encodeURIComponent(KEY)}`, { headers: { Authorization: `Bearer ${token}` } });
+  const r = await fetch(`${url}/get/${encodeURIComponent(getStateKey(profileId))}`, { headers: { Authorization: `Bearer ${token}` } });
   if (!r.ok) return null;
   const d = await r.json();
   return d?.result ? sanitize(JSON.parse(d.result)) : null;
 }
 
-async function kvWrite(payload: any) {
+async function kvWrite(profileId: any, payload: any) {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
   if (!url || !token) return false;
-  const r = await fetch(`${url}/set/${encodeURIComponent(KEY)}`, {
+  const r = await fetch(`${url}/set/${encodeURIComponent(getStateKey(profileId))}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ value: JSON.stringify(payload) }),
@@ -73,24 +84,24 @@ async function kvWrite(payload: any) {
   return r.ok;
 }
 
-async function readState() {
+async function readState(profileId: any) {
   try {
-    const state = await kvRead();
+    const state = await kvRead(profileId);
     if (state) return state;
   } catch(e) {}
   try {
-    return sanitize(JSON.parse(await fs.readFile(getFilePath(), 'utf8')));
+    return sanitize(JSON.parse(await fs.readFile(getFilePath(profileId), 'utf8')));
   } catch(e) {}
   return { ...DEFAULT_STATE };
 }
 
-async function writeState(payload: any) {
+async function writeState(profileId: any, payload: any) {
   try {
-    if (await kvWrite(payload)) return;
+    if (await kvWrite(profileId, payload)) return;
   } catch(e) {}
   try {
-    await fs.mkdir(path.dirname(getFilePath()), { recursive: true });
-    await fs.writeFile(getFilePath(), JSON.stringify(payload, null, 2), 'utf8');
+    await fs.mkdir(path.dirname(getFilePath(profileId)), { recursive: true });
+    await fs.writeFile(getFilePath(profileId), JSON.stringify(payload, null, 2), 'utf8');
   } catch(e) {}
 }
 
@@ -168,7 +179,12 @@ async function fetchCandles(symbol: string): Promise<{ closes: number[]; lastTim
           // Return synthetic candles based on current price (fallback)
           // In production, you'd get real 5m candles from MCX API
           const price = commodityQuote.price;
-          const closes = [price * 0.999, price * 0.998, price * 1.001, price * 0.995, price];
+          const closes = Array.from({ length: 60 }, (_, i) => {
+            const wave = Math.sin((Date.now() / 60000 + i) / 8) * 0.0015;
+            const drift = (i - 59) * 0.00002;
+            return parseFloat((price * (1 + wave + drift)).toFixed(2));
+          });
+          closes[closes.length - 1] = price;
           return { closes, lastTime: Date.now() };
         }
       }
@@ -197,6 +213,37 @@ async function fetchCandles(symbol: string): Promise<{ closes: number[]; lastTim
 async function fetchCommodityPrice(symbol: string): Promise<{ price: number; change: number } | null> {
   try {
     if (symbol === 'GOLDPETAL') {
+      const authorized = await fetchGoldpetalAuthorizedQuote();
+      if (authorized) {
+        return {
+          price: authorized.price,
+          change: parseFloat((authorized.price - authorized.prev).toFixed(2)),
+        };
+      }
+
+      try {
+        const data = await getJson(
+          'query2.finance.yahoo.com',
+          `/v7/finance/quote?symbols=${encodeURIComponent('GC=F,INR=X')}&fields=${encodeURIComponent('regularMarketPrice,regularMarketPreviousClose')}&formatted=false&lang=en&region=IN`
+        );
+        const quotes = data?.quoteResponse?.result || [];
+        const gold = quotes.find((q: any) => q.symbol === 'GC=F');
+        const inr = quotes.find((q: any) => q.symbol === 'INR=X');
+        if (gold?.regularMarketPrice && inr?.regularMarketPrice) {
+          const troy = 31.1035;
+          const premium = 1.035;
+          const price = ((gold.regularMarketPrice / troy) * inr.regularMarketPrice * premium);
+          const prevGold = gold.regularMarketPreviousClose || gold.regularMarketPrice;
+          const prevInr = inr.regularMarketPreviousClose || inr.regularMarketPrice;
+          const prev = ((prevGold / troy) * prevInr * premium);
+          return {
+            price: parseFloat(price.toFixed(2)),
+            change: parseFloat((price - prev).toFixed(2)),
+          };
+        }
+      } catch (e) {}
+
+      return { price: DEFAULT_PRICES.GOLDPETAL || 10500, change: 0 };
       // ── MCX GOLDPETAL: Try multiple sources ──
       
       // Option 1: Use a commodity API with INR support
@@ -302,10 +349,12 @@ function prevEma(closes: number[], period: number): number | null {
 
 // ── PIVOT BREAK CONFIRMATION: Calculate pivot high/low from recent candles ──
 function getPivotLevels(closes: number[], lookback: number = 5): { pivotHigh: number; pivotLow: number } {
-  if (closes.length < lookback) {
-    return { pivotHigh: Math.max(...closes), pivotLow: Math.min(...closes) };
+  const completed = closes.slice(0, -1);
+  const source = completed.length ? completed : closes;
+  if (source.length < lookback) {
+    return { pivotHigh: Math.max(...source), pivotLow: Math.min(...source) };
   }
-  const recent = closes.slice(-lookback);
+  const recent = source.slice(-lookback);
   return {
     pivotHigh: Math.max(...recent),
     pivotLow: Math.min(...recent),
@@ -356,7 +405,8 @@ module.exports = async (req: any, res: any) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-store');
 
-  const state = await readState();
+  const profileId = cleanProfileId(req?.query?.profileId || req?.query?.accountId);
+  const state = await readState(profileId);
   if (!state.scannerOn) {
     res.json({ ok: true, scannerOn: false, message: 'Scanner is OFF, no action taken' });
     return;
@@ -492,10 +542,10 @@ module.exports = async (req: any, res: any) => {
       const bullPivotBreak = price > pivotHigh;
       const bearPivotBreak = price < pivotLow;
       const pivotConfirmed = bullCross ? bullPivotBreak : bearPivotBreak;
+      if (!pivotConfirmed) return;
       
       const key = `${sym}_${dir}_${lastTime || closes.length}_${Math.round(e20)}_${Math.round(e50)}`;
       if (state.scannerTraded[key]) return;
-      state.scannerTraded[key] = true;
 
       const recent = closes.slice(-5);
       const slPrice = bullCross ? Math.min(...recent) * 0.9995 : Math.max(...recent) * 1.0005;
@@ -522,10 +572,10 @@ module.exports = async (req: any, res: any) => {
       };
 
       if (!confirmed) {
+        state.scannerTraded[key] = true;
         sig.status = 'SKIPPED (EMA trend not aligned)';
-      } else if (!pivotConfirmed) {
-        sig.status = 'SKIPPED (no pivot break)';
       } else if (bullCross) {
+        state.scannerTraded[key] = true;
         const total = price * qty;
         const marginRequired = total / EQUITY_LEVERAGE;
         if (marginRequired <= state.cash) {
@@ -557,6 +607,8 @@ module.exports = async (req: any, res: any) => {
         } else {
           sig.status = 'SKIPPED (low cash)';
         }
+      } else {
+        state.scannerTraded[key] = true;
       }
 
       state.scannerLog.unshift(sig);
@@ -566,7 +618,7 @@ module.exports = async (req: any, res: any) => {
   }
 
   state.updatedAt = Date.now();
-  await writeState(state);
+  await writeState(profileId, state);
 
   res.json({
     ok: true,
