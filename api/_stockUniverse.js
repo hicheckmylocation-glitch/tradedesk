@@ -163,17 +163,6 @@ const STOCKS = [
   { symbol: 'TORNTPOWER', name: 'Torrent Power', sector: 'Utilities' },
   { symbol: 'CESC', name: 'CESC', sector: 'Utilities' },
   { symbol: 'SUZLON', name: 'Suzlon Energy', sector: 'Utilities' },
-  // ── MCX Commodities ──────────────────────────────────────────────────────
-  { symbol: 'GOLD', name: 'MCX Gold (₹/10g)', sector: 'Commodity', yahoo: 'GOLD.MCX', defaultPrice: 152500 },
-  { symbol: 'GOLDM', name: 'MCX Gold Mini (₹/10g)', sector: 'Commodity', yahoo: 'GOLDM.MCX', defaultPrice: 152500 },
-  { symbol: 'GOLDPETAL', name: 'MCX Gold Petal (₹/1g)', sector: 'Commodity', yahoo: 'GOLDPETAL.MCX', defaultPrice: 15250 },
-  { symbol: 'SILVER', name: 'MCX Silver (₹/kg)', sector: 'Commodity', yahoo: 'SILVER.MCX', defaultPrice: 95000 },
-  { symbol: 'SILVERM', name: 'MCX Silver Mini (₹/kg)', sector: 'Commodity', yahoo: 'SILVERM.MCX', defaultPrice: 95000 },
-  { symbol: 'CRUDEOIL', name: 'MCX Crude Oil (₹/bbl)', sector: 'Commodity', yahoo: 'CRUDEOIL.MCX', defaultPrice: 5800 },
-  { symbol: 'NATURALGAS', name: 'MCX Natural Gas (₹/mmBtu)', sector: 'Commodity', yahoo: 'NATURALGAS.MCX', defaultPrice: 300 },
-  { symbol: 'COPPER', name: 'MCX Copper (₹/kg)', sector: 'Commodity', yahoo: 'COPPER.MCX', defaultPrice: 850 },
-  { symbol: 'ZINC', name: 'MCX Zinc (₹/kg)', sector: 'Commodity', yahoo: 'ZINC.MCX', defaultPrice: 260 },
-  { symbol: 'ALUMINIUM', name: 'MCX Aluminium (₹/kg)', sector: 'Commodity', yahoo: 'ALUMINIUM.MCX', defaultPrice: 235 },
 ];
 
 const QUOTE_SYMBOLS = Object.fromEntries(
