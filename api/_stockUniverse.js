@@ -6,7 +6,7 @@ const STOCKS = [
   { symbol: 'NIFTYBEES', name: 'Nippon India ETF Nifty BeES', sector: 'ETF' },
   { symbol: 'BANKBEES', name: 'Nippon India ETF Bank BeES', sector: 'ETF' },
   { symbol: 'JUNIORBEES', name: 'Nippon India ETF Junior BeES', sector: 'ETF' },
-  { symbol: 'GOLDPETAL', name: 'Gold Petal', sector: 'Commodity', defaultPrice: 10500 },
+  { symbol: 'GOLDPETAL', name: 'Gold Petal', sector: 'Commodity', defaultPrice: 14500 },
   { symbol: 'RELIANCE', name: 'Reliance Industries', sector: 'Energy' },
   { symbol: 'TCS', name: 'Tata Consultancy Services', sector: 'IT' },
   { symbol: 'HDFCBANK', name: 'HDFC Bank', sector: 'Banking' },
