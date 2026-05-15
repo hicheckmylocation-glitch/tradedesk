@@ -1,5 +1,6 @@
 const https = require("https");
 const { QUOTE_SYMBOLS, STOCKS } = require('./_stockUniverse');
+const { fetchGoldpetalAuthorizedQuote } = require('./_goldpetalFeed');
 
 // Build a map of symbol → defaultPrice for MCX/offline fallback
 const DEFAULT_PRICES: Record<string, number> = {};
@@ -70,9 +71,10 @@ function fetchChartFallback(yahooSym) {
   });
 }
 
-// ── LIVE MCX PRICE DERIVATION ─────────────────────────────────────────────
-// Yahoo Finance has no MCX feed, but we can derive accurate INR prices from
-// international futures (COMEX/NYMEX) + live USD/INR rate.
+// ── MCX PRICE HANDLING ───────────────────────────────────────────────────
+// True no-delay GOLDPETAL needs an authorized broker/vendor feed. If
+// GOLDPETAL_LTP_URL is configured, it wins. Otherwise we derive an indicative
+// INR price from international futures + USD/INR and label the source.
 const INTL_REFS = ['GC=F','SI=F','BZ=F','NG=F','HG=F','INR=X'];
 
 async function fetchIntlRates(): Promise<Record<string, { price: number; prev: number }>> {
@@ -213,17 +215,22 @@ module.exports = async (req, res) => {
     }));
   }
 
-  // Step 3: MCX commodities — derive live INR prices from COMEX/NYMEX + USD/INR
+  // Step 3: MCX commodities — authorized feed first, then indicative derivation.
   const needsDerived = requested.filter(sym => MCX_DERIVED_SYMBOLS.has(sym) || !result[sym]);
   if (needsDerived.length > 0) {
-    let derived: Record<string, { price: number; prev: number }> = {};
+    let authorizedGoldpetal: any = null;
+    if (needsDerived.includes('GOLDPETAL')) {
+      try { authorizedGoldpetal = await fetchGoldpetalAuthorizedQuote(); } catch(e) {}
+    }
+
+    let derived: Record<string, any> = {};
     try {
       const intlRates = await fetchIntlRates();
       derived = deriveMCXPrices(intlRates);
     } catch(e) {}
 
     needsDerived.forEach(sym => {
-      const d = derived[sym];
+      const d: any = sym === 'GOLDPETAL' && authorizedGoldpetal ? authorizedGoldpetal : derived[sym];
       const dp = DEFAULT_PRICES[sym];
       const fallback = dp ? movingFallbackPrice(dp, sym) : null;
       const price  = d?.price  || fallback?.price;
@@ -240,6 +247,8 @@ module.exports = async (req, res) => {
         open: prev,
         close: prev,
         week52High: 0, week52Low: 0, marketCap: 0,
+        source: d?.source || (derived[sym] ? 'derived-comex-usdinr' : 'fallback-indicative'),
+        feedTime: d?.feedTime || null,
       };
     });
   }
