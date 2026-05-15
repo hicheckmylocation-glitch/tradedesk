@@ -683,6 +683,10 @@ function updateTicker() {
 // ── TABS ───────────────────────────────────────────────────────────────────
 function setTab(tab, btn) {
   state.tab = tab;
+  if(tab === 'chart') {
+    chartState.zoom = DEFAULT_CHART_ZOOM;
+    chartState.panOffset = 0;
+  }
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   renderContent();
@@ -1019,7 +1023,7 @@ const chartState = {
   indicators: { ma20:true, ma50:true, bb:false, rsi:false, macd:false, vol:false, ema100:false, ema200:false, vwap:true, pivots:true },
   candles: 60,
   timeframe: '5m',
-  zoom: 1.0,
+  zoom: 0.5,
   panOffset: 0,
   _visibleCandles: 60,
   _chartSnapshot: null,
@@ -1029,6 +1033,7 @@ const chartState = {
 };
 
 // Candle counts per timeframe
+const DEFAULT_CHART_ZOOM = 0.5;
 const TF_CANDLES = { '1m':80, '5m':50, '10m':40, '15m':30, '30m':20, '1h':15 };
 const TF_LABEL = { '1m':'1 MIN', '5m':'5 MIN', '10m':'10 MIN', '15m':'15 MIN', '30m':'30 MIN', '1h':'1 HR' };
 
@@ -1894,6 +1899,7 @@ function showCrosshair(e, wrap) {
 function setTimeframe(tf){
   chartState.timeframe=tf;
   chartState.candles=TF_CANDLES[tf]||60;
+  chartState.zoom=DEFAULT_CHART_ZOOM;
   chartState.panOffset=0;
   renderChartTab();
 }
@@ -2534,7 +2540,14 @@ function quickSell(id) {
 }
 
 // ── HELPERS ─────────────────────────────────────────────────────────────────
-function selectStock(sym){ state.selected=sym; renderSidebar(); renderContent(); closeSidebar(); }
+function selectStock(sym){
+  state.selected=sym;
+  if(state.tab==='chart'){
+    chartState.zoom=DEFAULT_CHART_ZOOM;
+    chartState.panOffset=0;
+  }
+  renderSidebar(); renderContent(); closeSidebar();
+}
 function getPositions(sym,type){
   return Object.values(state.portfolio)
     .filter(h=>h.symbol===sym&&h.type===type)
