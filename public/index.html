@@ -543,6 +543,7 @@ async function fetchStockList() {
 async function refreshPrices() {
   const symbols = Object.keys(state.stocks);
   if(!symbols.length) return;
+  let chartNeedsRedraw = false;
 
   try {
     // Fetch in batches of 50
@@ -576,6 +577,9 @@ async function refreshPrices() {
           s.scanHistory.push(q.price);
           if(s.scanHistory.length > 350) s.scanHistory.shift();
         }
+        if(state.tab === 'chart' && state.selected === sym) {
+          chartNeedsRedraw = upsertLiveChartCandle(sym, q) || chartNeedsRedraw;
+        }
       });
     }));
 
@@ -586,6 +590,7 @@ async function refreshPrices() {
     if(state.selected && state.tab === 'market') renderMarket();
     if(state.tab === 'portfolio') renderPortfolio();
     if(state.tab === 'pnl') renderPnl();
+    if(chartNeedsRedraw) drawChart();
     runScanner();
   } catch(e) {
     console.error('refreshPrices failed:', e);
@@ -1011,14 +1016,14 @@ function applyAIPrice(sym, entryPrice, targetOrStop, tradeType) {
 // CHART ENGINE
 // ══════════════════════════════════════════════════════
 const chartState = {
-  indicators: { ma20:true, ma50:true, bb:false, rsi:false, macd:false, vol:true, ema100:false, ema200:false, vwap:true, pivots:true },
+  indicators: { ma20:true, ma50:true, bb:false, rsi:false, macd:false, vol:false, ema100:false, ema200:false, vwap:true, pivots:true },
   candles: 60,
   timeframe: '5m',
   zoom: 1.0,
   panOffset: 0,
   _visibleCandles: 60,
   _chartSnapshot: null,
-  chartH: 520,
+  chartH: 720,
   priceScale: 1.0,
   priceOffset: 0,
 };
@@ -1057,7 +1062,6 @@ function renderChartTab() {
           <button class="ind-btn ma50" style="color:#ff9800;${chartState.indicators.ema100?'background:rgba(255,152,0,0.15);border-color:#ff9800':''}" onclick="toggleInd('ema100')">EMA100</button>
           <button class="ind-btn ma50" style="color:#ab47bc;${chartState.indicators.ema200?'background:rgba(171,71,188,0.15);border-color:#ab47bc':''}" onclick="toggleInd('ema200')">EMA200</button>
           <button class="ind-btn bb ${chartState.indicators.vwap?'active':''}" style="color:#e040fb;" onclick="toggleInd('vwap')">VWAP</button>
-          <button class="ind-btn vol ${chartState.indicators.vol?'active':''}" onclick="toggleInd('vol')">VOL</button>
           <button class="ind-btn rsi ${chartState.indicators.rsi?'active':''}" onclick="toggleInd('rsi')">RSI</button>
           <button class="ind-btn" style="color:#fff176;${chartState.indicators.pivots?'background:rgba(255,241,118,0.12);border-color:#fff176':''}" onclick="toggleInd('pivots')">PIVOTS</button>
           <div style="width:1px;height:18px;background:var(--border);margin:0 4px;"></div>
@@ -1079,7 +1083,6 @@ function renderChartTab() {
         <!-- Canvases -->
         <div id="chart-canvas-wrap" style="flex:1;position:relative;overflow:hidden;cursor:crosshair;touch-action:none;">
           <canvas id="mainChart" style="display:block;width:100%;"></canvas>
-          ${chartState.indicators.vol?'<canvas id="volChart" style="display:block;width:100%;border-top:1px solid var(--border);"></canvas>':''}
           ${chartState.indicators.rsi?'<canvas id="rsiChart" style="display:block;width:100%;border-top:1px solid var(--border);"></canvas>':''}
           <div id="ct-tooltip" style="display:none;position:absolute;background:rgba(16,18,26,0.95);border:1px solid var(--border);border-radius:4px;padding:8px 12px;font-size:11px;pointer-events:none;z-index:10;min-width:160px;"></div>
         </div>
@@ -1208,6 +1211,56 @@ async function loadMoreHistory() {
   }
   chartState._loadingMore = false;
   drawChart();
+}
+
+function chartIntervalMs() {
+  const mins = {'1m':1,'5m':5,'10m':10,'15m':15,'30m':30,'1h':60}[chartState.timeframe] || 5;
+  return mins * 60000;
+}
+
+function quoteTimestampMs(q) {
+  if(q?.feedTime) {
+    const parsed = typeof q.feedTime === 'number' ? q.feedTime : Date.parse(q.feedTime);
+    if(Number.isFinite(parsed) && parsed > 0) return parsed < 10000000000 ? parsed * 1000 : parsed;
+  }
+  return Date.now();
+}
+
+function upsertLiveChartCandle(sym, q) {
+  if(!q?.price || q.price <= 0) return false;
+  if(!chartState._candles || !chartState._candles.length) return false;
+  if(state.selected !== sym || !document.getElementById('mainChart')) return false;
+
+  const candles = chartState._candles;
+  const interval = chartIntervalMs();
+  const bucket = Math.floor(quoteTimestampMs(q) / interval) * interval;
+  const last = candles[candles.length - 1];
+  const lastBucket = Math.floor((last.time || 0) / interval) * interval;
+  const price = parseFloat(Number(q.price).toFixed(2));
+
+  if(bucket > lastBucket) {
+    const open = last.close || price;
+    candles.push({
+      time: bucket,
+      open,
+      high: Math.max(open, price),
+      low: Math.min(open, price),
+      close: price,
+      vol: q.volume || 0,
+    });
+    if(candles.length > 2000) candles.shift();
+  } else {
+    last.close = price;
+    last.high = Math.max(last.high || price, price);
+    last.low = Math.min(last.low || price, price);
+    last.vol = Math.max(last.vol || 0, q.volume || 0);
+  }
+
+  const s = state.stocks[sym];
+  if(s) s._chartCandles = candles;
+  const statusEl = document.getElementById('ct-fetch-status');
+  if(statusEl) statusEl.textContent = `✓ live ${TF_LABEL[chartState.timeframe] || chartState.timeframe} candles`;
+  return true;
 }
 
 function buildSimulatedCandles(sym) {
