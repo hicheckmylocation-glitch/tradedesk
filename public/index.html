@@ -70,6 +70,32 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;height:1px;backgroun
 .stat-val{font-size:14px;font-weight:600;}
 .trade-panel{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:20px;margin-bottom:20px;}
 .trade-title{font-family:'Syne',sans-serif;font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin-bottom:16px;color:var(--amber2);}
+/* ── AI ADVISOR PANEL ── */
+.ai-advisor-panel{background:linear-gradient(135deg,rgba(79,195,247,0.08),rgba(100,200,255,0.04));border:2px solid rgba(79,195,247,0.3);border-radius:6px;padding:16px;margin-bottom:20px;position:relative;overflow:hidden;}
+.ai-advisor-panel::before{content:'';position:absolute;top:-50%;right:-50%;width:400px;height:400px;background:radial-gradient(circle,rgba(79,195,247,0.08),transparent);pointer-events:none;}
+.ai-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;color:#4fc3f7;display:flex;align-items:center;gap:8px;position:relative;z-index:1;}
+.ai-title::before{content:'🤖';font-size:16px;}
+.ai-loading{color:var(--muted);font-size:12px;text-align:center;padding:20px;animation:pulse 2s infinite;}
+.ai-error{background:rgba(255,68,68,0.1);border:1px solid rgba(255,68,68,0.3);color:var(--red);padding:12px;border-radius:4px;font-size:11px;margin-bottom:12px;}
+.ai-rec-box{background:var(--bg3);border-left:3px solid #4fc3f7;border-radius:4px;padding:12px;margin-bottom:12px;position:relative;z-index:1;}
+.ai-rec-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+.ai-rec-signal{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px;}
+.ai-rec-signal.buy{color:var(--green);}
+.ai-rec-signal.sell{color:var(--red);}
+.ai-rec-signal.hold{color:var(--muted);}
+.ai-confidence{font-size:11px;color:var(--muted);background:rgba(120,120,120,0.1);padding:3px 8px;border-radius:3px;font-weight:600;}
+.ai-rec-row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:11px;border-bottom:1px solid rgba(79,195,247,0.1);}
+.ai-rec-row:last-child{border:none;}
+.ai-rec-label{color:var(--muted);}
+.ai-rec-value{color:#4fc3f7;font-weight:600;}
+.ai-reasoning{background:rgba(79,195,247,0.05);border:1px solid rgba(79,195,247,0.15);border-radius:4px;padding:10px;font-size:11px;line-height:1.4;color:var(--text);margin-top:10px;font-style:italic;position:relative;z-index:1;}
+.ai-action-btn{display:flex;gap:6px;margin-top:12px;position:relative;z-index:1;}
+.ai-apply-btn{flex:1;padding:8px 12px;background:rgba(79,195,247,0.2);border:1px solid #4fc3f7;color:#4fc3f7;border-radius:4px;font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;transition:all .2s;text-transform:uppercase;letter-spacing:1px;}
+.ai-apply-btn:hover{background:#4fc3f7;color:var(--bg);border-color:#4fc3f7;}
+.ai-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:12px;font-size:10px;position:relative;z-index:1;}
+.ai-stat{background:rgba(79,195,247,0.05);border:1px solid rgba(79,195,247,0.15);padding:8px;border-radius:3px;text-align:center;}
+.ai-stat-label{color:var(--muted);display:block;margin-bottom:3px;}
+.ai-stat-val{color:#4fc3f7;font-weight:700;display:block;}
 .trade-type-tabs{display:flex;gap:8px;margin-bottom:16px;}
 .trade-type-btn{flex:1;padding:10px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--muted);font-family:inherit;font-size:13px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:1px;transition:all .2s;}
 .trade-type-btn.buy-active{background:rgba(0,230,118,0.15);color:var(--green);border-color:var(--green);}
@@ -325,9 +351,26 @@ let state = {
 };
 
 const EQUITY_LEVERAGE = 5;
-const LOCAL_STATE_KEY = 'td_state';
+const PROFILE_ID_KEY = 'td_profile_id';
 const SHARED_SYNC_MS = 15000;
 let sharedSyncInFlight = false;
+
+function getProfileId() {
+  const fromUrl = new URLSearchParams(window.location.search).get('profileId');
+  if(fromUrl && /^[a-zA-Z0-9_-]{1,48}$/.test(fromUrl)) {
+    localStorage.setItem(PROFILE_ID_KEY, fromUrl);
+    return fromUrl;
+  }
+  let id = localStorage.getItem(PROFILE_ID_KEY);
+  if(!id) {
+    id = 'profile_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-5);
+    localStorage.setItem(PROFILE_ID_KEY, id);
+  }
+  return id;
+}
+
+const PROFILE_ID = getProfileId();
+const LOCAL_STATE_KEY = `td_state_${PROFILE_ID}`;
 
 function serializeState(updatedAt) {
   return {
@@ -377,7 +420,7 @@ function loadLocalState() {
 
 async function loadSharedState() {
   try {
-    const res = await fetch('/api/state', { cache: 'no-store' });
+    const res = await fetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
@@ -387,10 +430,10 @@ async function loadSharedState() {
 
 async function pushSharedState(payload) {
   try {
-    const res = await fetch('/api/state', {
+    const res = await fetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, profileId: PROFILE_ID }),
     });
     if (res.status === 409) {
       const remote = await res.json();
@@ -523,6 +566,8 @@ async function refreshPrices() {
         s.week52High = q.week52High;
         s.week52Low = q.week52Low;
         s.marketCap = q.marketCap;
+        s.quoteSource = q.source || 'exchange';
+        s.feedTime = q.feedTime || null;
         if(q.price > 0) s.history.push(q.price);
         if(s.history.length > 200) s.history.shift();
         // Feed live price into scanHistory so scanner detects crossovers in real-time
@@ -672,6 +717,7 @@ function renderMarket() {
       <div>
         <div class="detail-price-val">₹${fn(s.price)}</div>
         <div class="detail-price-chg ${cls}">${chgStr}</div>
+        ${s.quoteSource ? `<div class="detail-price-chg" style="color:var(--muted)">${s.quoteSource}</div>` : ''}
       </div>
     </div>
 
@@ -689,6 +735,11 @@ function renderMarket() {
       <div class="stat-card"><div class="stat-label">52W Low</div><div class="stat-val neg">₹${fn(s.week52Low)}</div></div>
       <div class="stat-card"><div class="stat-label">Market Cap</div><div class="stat-val">${fmtMCap(s.marketCap)}</div></div>
       <div class="stat-card"><div class="stat-label">Holding</div><div class="stat-val">${held ? held.qty+' shares' : '—'}</div></div>
+    </div>
+
+    <div class="ai-advisor-panel" id="ai-panel">
+      <div class="ai-title">AI Advisor</div>
+      <div id="ai-content" class="ai-loading">Fetching AI recommendation...</div>
     </div>
 
     <div class="trade-panel">
@@ -729,6 +780,7 @@ function renderMarket() {
     </div>`;
   calcEq();
   drawChart(sym);
+  fetchAIAdvisor(sym);
 }
 
 function getEquityCharges(turnover, isBuy) {
@@ -823,6 +875,137 @@ function drawChart(sym) {
   ctx.lineWidth = 1.5; ctx.stroke();
 }
 
+// ══════════════════════════════════════════════════════
+// AI ADVISOR
+// ══════════════════════════════════════════════════════
+async function fetchAIAdvisor(sym) {
+  const contentEl = document.getElementById('ai-content');
+  if (!contentEl) return;
+  
+  try {
+    const s = state.stocks[sym];
+    if (!s) {
+      contentEl.innerHTML = '<div class="ai-error">Stock data not available</div>';
+      return;
+    }
+
+    const payload = {
+      symbol: sym,
+      stockData: {
+        price: s.price,
+        dayHigh: s.high,
+        dayLow: s.low,
+        fiftyTwoWeekHigh: s.week52High,
+        fiftyTwoWeekLow: s.week52Low,
+        volume: s.volume,
+        marketCap: s.marketCap,
+      },
+      state: serializeState(), // Include trade history for learning
+    };
+
+    const response = await fetch('/api/ai-advisor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      contentEl.innerHTML = `<div class="ai-error">API Error: ${errorData.error || 'Unknown error'}</div>`;
+      return;
+    }
+
+    const result = await response.json();
+    displayAIRecommendation(result, sym);
+  } catch (error) {
+    console.error('AI Advisor error:', error);
+    contentEl.innerHTML = `<div class="ai-error">Failed to fetch AI recommendation: ${error.message}</div>`;
+  }
+}
+
+function displayAIRecommendation(result, sym) {
+  const contentEl = document.getElementById('ai-content');
+  if (!contentEl) return;
+
+  const advice = result.advice || {};
+  const patterns = result.yourPatterns || {};
+  const recClass = advice.recommendation === 'BUY' ? 'buy' : advice.recommendation === 'SELL' ? 'sell' : 'hold';
+  const recSymbol = advice.recommendation === 'BUY' ? '▲' : advice.recommendation === 'SELL' ? '▼' : '→';
+  
+  const winRate = patterns.winRate ? (patterns.winRate * 100).toFixed(0) : 'N/A';
+  
+  let html = `
+    <div class="ai-rec-box">
+      <div class="ai-rec-header">
+        <div class="ai-rec-signal ${recClass}">${recSymbol} ${advice.recommendation || 'HOLD'}</div>
+        <div class="ai-confidence">Confidence: ${advice.confidence || '?'}/10</div>
+      </div>
+      
+      <div class="ai-rec-row">
+        <span class="ai-rec-label">Entry Price</span>
+        <span class="ai-rec-value">₹${advice.entryPrice ? advice.entryPrice.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="ai-rec-row">
+        <span class="ai-rec-label">Target Price</span>
+        <span class="ai-rec-value">₹${advice.targetPrice ? advice.targetPrice.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="ai-rec-row">
+        <span class="ai-rec-label">Stop Loss</span>
+        <span class="ai-rec-value">₹${advice.stopLoss ? advice.stopLoss.toFixed(2) : 'N/A'}</span>
+      </div>
+      <div class="ai-rec-row">
+        <span class="ai-rec-label">Risk:Reward</span>
+        <span class="ai-rec-value">${advice.riskReward || 'N/A'}</span>
+      </div>
+      <div class="ai-rec-row">
+        <span class="ai-rec-label">Timeframe</span>
+        <span class="ai-rec-value">${advice.timeframe || 'N/A'}</span>
+      </div>
+      
+      ${advice.reasoning ? `<div class="ai-reasoning">"${advice.reasoning}"</div>` : ''}
+    </div>
+
+    <div class="ai-stats">
+      <div class="ai-stat">
+        <span class="ai-stat-label">Your Win Rate</span>
+        <span class="ai-stat-val">${winRate}%</span>
+      </div>
+      <div class="ai-stat">
+        <span class="ai-stat-label">Total Trades</span>
+        <span class="ai-stat-val">${patterns.totalTrades || 0}</span>
+      </div>
+    </div>
+    
+    ${advice.recommendation === 'BUY' ? `
+      <div class="ai-action-btn">
+        <button class="ai-apply-btn" onclick="applyAIPrice('${sym}', ${advice.entryPrice}, ${advice.targetPrice}, 'BUY')">
+          ⚡ Apply Entry & Target
+        </button>
+      </div>
+    ` : advice.recommendation === 'SELL' ? `
+      <div class="ai-action-btn">
+        <button class="ai-apply-btn" onclick="applyAIPrice('${sym}', ${advice.entryPrice}, ${advice.stopLoss}, 'SELL')">
+          ⚡ Apply Entry & Stop
+        </button>
+      </div>
+    ` : ''}
+  `;
+  
+  contentEl.innerHTML = html;
+}
+
+function applyAIPrice(sym, entryPrice, targetOrStop, tradeType) {
+  const priceInput = document.getElementById('eq-price');
+  const qtyInput = document.getElementById('eq-qty');
+  
+  if (priceInput) priceInput.value = entryPrice.toFixed(2);
+  if (qtyInput) qtyInput.value = 1; // Default qty
+  
+  state.tradeType = tradeType;
+  calcEq();
+  
+  notify(`${tradeType} signal applied: Entry ₹${entryPrice.toFixed(2)}, Target ₹${targetOrStop.toFixed(2)}`, 'info');
+}
 
 // ══════════════════════════════════════════════════════
 // CHART ENGINE
@@ -1153,17 +1336,16 @@ function drawChart() {
 
   // Indicators — use warmup buffer so EMA100/200 never go null when panning
   const closes = candles.map(c=>c.close);
-  const WARMUP = 250;
-  const warmupCandles = allCandles.slice(Math.max(0, startIdx - WARMUP), endIdx);
-  const warmupCloses = warmupCandles.map(c=>c.close);
-  const wOff = warmupCandles.length - candles.length;
-  const ema20  = calcEMA(warmupCloses, 20).slice(wOff);
-  const ema50  = calcEMA(warmupCloses, 50).slice(wOff);
-  const ema100 = calcEMA(warmupCloses, 100).slice(wOff);
-  const ema200 = calcEMA(warmupCloses, 200).slice(wOff);
-  const vwap = calcVWAP(candles);
-  const bb = calcBB(closes, 20, 2);
-  const rsiVals = calcRSI(closes, 14);
+  const allCloses = allCandles.map(c=>c.close);
+  const sliceVisible = arr => arr.slice(startIdx, actualEndIdx);
+  const ema20  = sliceVisible(calcEMA(allCloses, 20));
+  const ema50  = sliceVisible(calcEMA(allCloses, 50));
+  const ema100 = sliceVisible(calcEMA(allCloses, 100));
+  const ema200 = sliceVisible(calcEMA(allCloses, 200));
+  const vwap = sliceVisible(calcVWAP(allCandles));
+  const fullBB = calcBB(allCloses, 20, 2);
+  const bb = { upper: sliceVisible(fullBB.upper), lower: sliceVisible(fullBB.lower), mid: sliceVisible(fullBB.mid) };
+  const rsiVals = sliceVisible(calcRSI(allCloses, 14));
   const vols = candles.map(c=>c.vol);
 
   // Price range
@@ -1175,7 +1357,7 @@ function drawChart() {
   [ema20,ema50,ema100,ema200,vwap].forEach(arr => arr.filter(Boolean).forEach(v=>allPrices.push(v)));
   if(chartState.indicators.bb){ bb.upper.filter(Boolean).forEach(v=>allPrices.push(v)); bb.lower.filter(Boolean).forEach(v=>allPrices.push(v)); }
   // Pivots calculated from visible candles — NOT added to allPrices to avoid distorting scale
-  const pivotSessions = chartState.indicators.pivots ? calcPivots(candles) : [];
+  const pivotSessions = chartState.indicators.pivots ? calcPivots(allCandles, startIdx, actualEndIdx - 1) : [];
   let pMin0 = Math.min(...allPrices)*0.9985;
   let pMax0 = Math.max(...allPrices)*1.0015;
   // Apply vertical price scale + offset (drag Y-axis to scale, drag chart to pan vertically)
@@ -1245,9 +1427,11 @@ function drawChart() {
 
   // Pivot Points — Traditional: each day's pivots span only that day's candles
   if(pivotSessions.length > 0 && chartState.indicators.pivots) {
-    pivotSessions.forEach(({levels, startIdx, endIdx}) => {
-      const startX = px(startIdx);
-      const endX = Math.min(px(endIdx) + candleW, W - PAD.right);
+    pivotSessions.forEach(({levels, startIdx: absStartIdx, endIdx: absEndIdx}) => {
+      const localStartIdx = Math.max(0, absStartIdx - chartState._startIdx);
+      const localEndIdx = Math.min(candles.length - 1, absEndIdx - chartState._startIdx);
+      const startX = px(localStartIdx);
+      const endX = Math.min(px(localEndIdx) + candleW, W - PAD.right);
       if(startX >= endX || startX < 0) return;
       
       levels.forEach(({v, c, l}) => {
@@ -1385,7 +1569,7 @@ function updateChartLegend(ema20,ema50,ema100,ema200,vwap){
 // ── PIVOT POINTS (Traditional) ──────────────────────────────────────────
 // calcPivots: returns array of sessions, each with levels + start/end candle indices
 // Kite-style: every visible session gets its own pivot lines from its own previous day's H/L/C
-function calcPivots(candles) {
+function calcPivots(candles, visibleStart = 0, visibleEnd = Infinity) {
   if(!candles || candles.length < 2) return [];
   // Group candles by day
   const dayMap = {};
@@ -1405,6 +1589,7 @@ function calcPivots(candles) {
     const L = Math.min(...prevList.map(c=>c.low));
     const C = prevList[prevList.length-1].close;
     const P = (H+L+C)/3;
+    if(currDay.lastIdx < visibleStart || currDay.firstIdx > visibleEnd) continue;
     sessions.push({
       levels: [
         {v: H+2*(P-L),   c:'#c62828', l:'R3'},
@@ -1425,7 +1610,14 @@ function calcPivots(candles) {
 // ── VWAP CALCULATION ──────────────────────────────────────────────────────
 function calcVWAP(candles) {
   let cumTPV = 0, cumVol = 0;
+  let dayKey = null;
   return candles.map(c => {
+    const key = new Date(c.time).toDateString();
+    if(key !== dayKey) {
+      dayKey = key;
+      cumTPV = 0;
+      cumVol = 0;
+    }
     const tp = (c.high + c.low + c.close) / 3;
     cumTPV += tp * c.vol;
     cumVol += c.vol;
@@ -1772,6 +1964,7 @@ function renderCommodityFutures() {
       <div>
         <div class="detail-price-val">₹${fn(spot)}</div>
         <div class="detail-price-chg ${cls}">${s.change>=0?'+':''}₹${Math.abs(s.change||0).toFixed(2)} (${s.changePct>=0?'+':''}${(s.changePct||0).toFixed(2)}%)</div>
+        ${s.quoteSource ? `<div class="detail-price-chg" style="color:var(--muted)">${s.quoteSource}</div>` : ''}
       </div>
     </div>
 
@@ -2444,6 +2637,15 @@ function _prevEma(closes, period) {
   if(!closes||closes.length<period+1) return null;
   return _ema(closes.slice(0,-1), period);
 }
+function getScannerPivotLevels(closes, lookback = 5) {
+  const completed = (closes || []).slice(0, -1);
+  const source = completed.length ? completed : (closes || []);
+  const recent = source.slice(-lookback);
+  return {
+    pivotHigh: Math.max(...recent),
+    pivotLow: Math.min(...recent),
+  };
+}
 
 function getEmaSlopeDirection(currentValue, previousValue, referencePrice) {
   if(currentValue == null || previousValue == null) return null;
@@ -2525,10 +2727,12 @@ function runScanner() {
     // EMA100 & EMA200 must move in the same direction and stay separated.
     const e100=_ema(closes,100), e200=_ema(closes,200);
     const dir=bullCross?'BUY':'SELL';
-    const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}`;
-    if(state.scannerTraded[key]) return;
-    state.scannerTraded[key]=true;
     const entry=s.price||closes[closes.length-1]; if(!entry||entry<=0) return;
+    const { pivotHigh, pivotLow } = getScannerPivotLevels(closes);
+    const pivotConfirmed = bullCross ? entry > pivotHigh : entry < pivotLow;
+    if(!pivotConfirmed) return;
+    const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}_${Math.round(pivotHigh)}_${Math.round(pivotLow)}`;
+    if(state.scannerTraded[key]) return;
     const p100=_prevEma(closes,100), p200=_prevEma(closes,200);
     const alignment = getEmaTrendAlignment(e100, p100, e200, p200, entry);
     const confirmed = bullCross ? alignment.bullish : alignment.bearish;
@@ -2543,14 +2747,16 @@ function runScanner() {
       entry:parseFloat(entry.toFixed(2)), sl:parseFloat(slPrice.toFixed(2)),
       target:parseFloat(target.toFixed(2)), qty, rr:'1:1',
       time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
-      status:'SIGNAL', pnl:null, confirmed
+      status:'SIGNAL', pnl:null, confirmed, pivotConfirmed
     };
     if(!confirmed) {
+      state.scannerTraded[key]=true;
       sig.status='SKIPPED (EMA100/200 not aligned)';
     } else if(bullCross) {
       const total=entry*qty;
       const marginRequired = total / EQUITY_LEVERAGE;
       if(marginRequired<=state.cash){
+        state.scannerTraded[key]=true;
         state.cash-=marginRequired;
         addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
         addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,charges:0,realizedPnl:0,
@@ -2558,7 +2764,9 @@ function runScanner() {
         sig.status='EXECUTED';
         notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | Margin ₹${fn(marginRequired)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
         updateHeader(); save();
-      } else { sig.status='SKIPPED (low cash)'; }
+      } else { state.scannerTraded[key]=true; sig.status='SKIPPED (low cash)'; }
+    } else {
+      state.scannerTraded[key]=true;
     }
     state.scannerLog.unshift(sig);
     if(state.scannerLog.length>50) state.scannerLog.pop();
@@ -2571,7 +2779,7 @@ function toggleScanner() {
   state.scannerOn=!state.scannerOn; save();
   if(state.scannerOn){
     Object.keys(state.stocks).forEach(sym=>{ if(!state.stocks[sym].scanHistory) state.stocks[sym].scanHistory=[]; });
-    setTimeout(() => fetch('/api/cron-scanner?manual=1', { cache: 'no-store' }).catch(()=>{}), 1200);
+    setTimeout(() => fetch('/api/cron-scanner?manual=1&profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store' }).catch(()=>{}), 1200);
     notify('\ud83e\udd16 Auto Scanner ON — browser + server scanner started','success');
     primeScanner().then(()=>{
       notify('\ud83e\udd16 Scanner ready — watching for EMA20\u00d7EMA50 crossovers','success');
