@@ -83,6 +83,19 @@ async function fetchIntlRates(): Promise<Record<string, { price: number; prev: n
   quotes.forEach(q => {
     if(q.regularMarketPrice) r[q.symbol] = { price: q.regularMarketPrice, prev: q.regularMarketPreviousClose || q.regularMarketPrice };
   });
+
+  const missing = INTL_REFS.filter(sym => !r[sym]);
+  if (missing.length > 0) {
+    await Promise.all(missing.map(async sym => {
+      const meta: any = await fetchChartFallback(sym);
+      if (!meta?.regularMarketPrice) return;
+      r[sym] = {
+        price: meta.regularMarketPrice,
+        prev: meta.previousClose || meta.chartPreviousClose || meta.regularMarketPrice,
+      };
+    }));
+  }
+
   return r;
 }
 
