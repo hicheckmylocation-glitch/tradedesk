@@ -196,31 +196,67 @@ async function fetchCandles(symbol: string): Promise<{ closes: number[]; lastTim
 
 async function fetchCommodityPrice(symbol: string): Promise<{ price: number; change: number } | null> {
   try {
-    // ── Fetch gold commodity price from free public source ──
     if (symbol === 'GOLDPETAL') {
-      // Use YodleeAPI or direct MCX public data endpoint
-      // For production, integrate with MCX API: https://www.mcx.exchange/
-      // Free alternative: Scrape from public commodity websites or use Polygon.io crypto gold
+      // ── MCX GOLDPETAL: Try multiple sources ──
       
-      // Placeholder: In production, call real MCX API
-      const url = 'https://api.metals.live/v1/spot/gold';
-      const response = await fetch(url, { 
-        headers: { 'User-Agent': 'Mozilla/5.0' } 
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        // metals.live returns gold prices in USD per ounce
-        // Convert to INR or use the price directly
-        return {
-          price: data.price || 0,
-          change: data.bid ? data.bid - data.ask : 0,
-        };
+      // Option 1: Use a commodity API with INR support
+      // Try to fetch from a public API that has Indian commodity prices
+      try {
+        // Use a free commodity quotes endpoint
+        const url = 'https://api.commoditiesapi.com/latest?base=USD&symbols=XAU';
+        const response = await fetch(url);
+        
+        if (response.ok) {
+          const data = await response.json();
+          // XAU is USD per troy ounce, convert to INR per gram
+          // 1 troy oz = 31.1035 grams
+          // Approximate USD to INR = 83 (varies, but reasonable approximation)
+          if (data.rates && data.rates.XAU) {
+            const usdPerOz = data.rates.XAU;
+            const inrPerGram = (usdPerOz / 31.1035) * 83; // Rough conversion
+            return {
+              price: parseFloat(inrPerGram.toFixed(2)),
+              change: 0, // We don't have previous data
+            };
+          }
+        }
+      } catch (e) {
+        // Fallback to next method
       }
+      
+      // Option 2: Use metals.live but with proper conversion
+      try {
+        const url = 'https://api.metals.live/v1/spot/gold';
+        const response = await fetch(url, { 
+          headers: { 'User-Agent': 'Mozilla/5.0' } 
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          // metals.live returns gold prices in USD per ounce
+          if (data.price) {
+            // Convert USD per troy ounce to INR per gram
+            // 1 troy oz = 31.1035 grams
+            // Rough USD to INR conversion rate (23 May 2026: ~83)
+            const usdPerOz = data.price;
+            const inrPerGram = (usdPerOz / 31.1035) * 83;
+            return {
+              price: parseFloat(inrPerGram.toFixed(2)),
+              change: 0,
+            };
+          }
+        }
+      } catch (e) {
+        // Fallback to mock data
+      }
+      
+      // Fallback: Return null (scanner will skip GOLDPETAL)
+      console.log(`[WARN] GOLDPETAL price unavailable - check commodity API`);
+      return null;
     }
     return null;
   } catch (e) {
-    console.log(`[WARN] Could not fetch commodity price for ${symbol}`);
+    console.log(`[WARN] Could not fetch commodity price for ${symbol}: ${e.message}`);
     return null;
   }
 }
