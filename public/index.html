@@ -15,15 +15,6 @@
 *{margin:0;padding:0;box-sizing:border-box;}
 body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:13px;overflow-x:hidden;}
 body::before{content:'';position:fixed;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--amber),transparent);z-index:100;}
-.profile-lock-overlay{position:fixed;inset:0;z-index:500;background:rgba(5,6,9,.94);display:none;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(8px);}
-.profile-lock-overlay.show{display:flex;}
-.profile-lock-card{width:min(420px,100%);background:var(--bg2);border:1px solid var(--border);border-top:3px solid var(--amber);border-radius:8px;padding:26px;box-shadow:0 24px 80px rgba(0,0,0,.65);}
-.profile-lock-title{font-family:'Syne',sans-serif;color:var(--amber);font-size:21px;font-weight:800;margin-bottom:6px;}
-.profile-lock-copy{color:var(--muted);font-size:11px;line-height:1.6;margin-bottom:18px;}
-.profile-lock-error{display:none;color:var(--red);font-size:11px;background:rgba(255,68,68,.1);border:1px solid rgba(255,68,68,.25);padding:8px 10px;border-radius:4px;margin-bottom:12px;}
-.profile-lock-input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:11px 12px;border-radius:4px;font-family:inherit;margin-bottom:10px;outline:none;}
-.profile-lock-input:focus{border-color:var(--amber);}
-.profile-lock-submit{width:100%;border:none;border-radius:4px;background:var(--amber);color:var(--bg);padding:11px;font-family:inherit;font-weight:800;cursor:pointer;margin-top:4px;}
 #header{background:var(--bg2);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
 .logo{font-family:'Syne',sans-serif;font-size:18px;font-weight:800;letter-spacing:2px;color:var(--amber);}
 .logo span{color:var(--text);}
@@ -287,18 +278,6 @@ canvas{width:100%;height:100px;}
 <body>
 
 <div id="notification"></div>
-<div id="profile-lock-overlay" class="profile-lock-overlay">
-  <div class="profile-lock-card">
-    <div class="profile-lock-title" id="profile-lock-title">Unlock TradeDesk</div>
-    <div class="profile-lock-copy" id="profile-lock-copy"></div>
-    <div class="profile-lock-error" id="profile-lock-error"></div>
-    <form onsubmit="submitProfilePassword(event)">
-      <input class="profile-lock-input" id="profile-password" type="password" minlength="8" maxlength="128" autocomplete="current-password" placeholder="Password" required/>
-      <input class="profile-lock-input" id="profile-password-confirm" type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="Confirm password"/>
-      <button class="profile-lock-submit" id="profile-lock-submit" type="submit">UNLOCK PROFILE</button>
-    </form>
-  </div>
-</div>
 <div id="modal-overlay">
   <div class="modal">
     <button class="modal-close" onclick="closeModal()">✕</button>
@@ -319,7 +298,6 @@ canvas{width:100%;height:100px;}
     <div class="hstat"><div class="hstat-label">Portfolio</div><div class="hstat-val" id="hdr-portfolio">₹0.00</div></div>
     <div class="hstat"><div class="hstat-label">Total P&L</div><div class="hstat-val" id="hdr-pnl" style="color:var(--muted)">₹0.00</div></div>
     <button class="refresh-btn" onclick="tickPrices()">⟳ REFRESH</button>
-    <button class="refresh-btn" onclick="logoutProfile()" title="Lock this profile">🔒 LOCK</button>
   </div>
 </div>
 
@@ -397,100 +375,6 @@ function getProfileId() {
 
 const PROFILE_ID = getProfileId();
 const LOCAL_STATE_KEY = `td_state_${PROFILE_ID}`;
-let profileAuthConfigured = false;
-let profileUnlockResolver = null;
-
-async function getProfileAuthStatus() {
-  const response = await fetch('/api/auth?profileId=' + encodeURIComponent(PROFILE_ID), {
-    cache: 'no-store',
-    credentials: 'same-origin',
-  });
-  if(!response.ok) throw new Error('Password service is unavailable');
-  return response.json();
-}
-
-function showProfileLock(configured) {
-  profileAuthConfigured = configured;
-  const overlay = document.getElementById('profile-lock-overlay');
-  const confirm = document.getElementById('profile-password-confirm');
-  const title = document.getElementById('profile-lock-title');
-  const copy = document.getElementById('profile-lock-copy');
-  const submit = document.getElementById('profile-lock-submit');
-  const password = document.getElementById('profile-password');
-  document.getElementById('profile-lock-error').style.display = 'none';
-  title.textContent = configured ? 'Unlock TradeDesk' : 'Create Profile Password';
-  copy.textContent = configured
-    ? 'Enter your password to access this portfolio and Auto Scan.'
-    : 'Protect this portfolio with a password of at least 8 characters. The password is securely hashed on the server.';
-  submit.textContent = configured ? 'UNLOCK PROFILE' : 'CREATE PASSWORD';
-  confirm.style.display = configured ? 'none' : 'block';
-  confirm.required = !configured;
-  password.value = '';
-  confirm.value = '';
-  overlay.classList.add('show');
-  setTimeout(() => password.focus(), 50);
-}
-
-async function ensureProfileAccess(force = false) {
-  if(profileUnlockResolver && !force) {
-    return new Promise(resolve => {
-      const previous = profileUnlockResolver;
-      profileUnlockResolver = () => { previous(); resolve(true); };
-    });
-  }
-  const status = await getProfileAuthStatus();
-  if(status.authenticated) return true;
-  showProfileLock(status.configured);
-  return new Promise(resolve => { profileUnlockResolver = resolve; });
-}
-
-async function submitProfilePassword(event) {
-  event.preventDefault();
-  const password = document.getElementById('profile-password').value;
-  const confirm = document.getElementById('profile-password-confirm').value;
-  const errorEl = document.getElementById('profile-lock-error');
-  if(!profileAuthConfigured && password !== confirm) {
-    errorEl.textContent = 'Passwords do not match.';
-    errorEl.style.display = 'block';
-    return;
-  }
-  const button = document.getElementById('profile-lock-submit');
-  button.disabled = true;
-  button.textContent = 'PLEASE WAIT...';
-  try {
-    const response = await fetch('/api/auth?profileId=' + encodeURIComponent(PROFILE_ID), {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: profileAuthConfigured ? 'login' : 'setup',
-        profileId: PROFILE_ID,
-        password,
-      }),
-    });
-    const result = await response.json();
-    if(!response.ok) throw new Error(result.error || 'Could not unlock profile');
-    document.getElementById('profile-lock-overlay').classList.remove('show');
-    const resolve = profileUnlockResolver;
-    profileUnlockResolver = null;
-    if(resolve) resolve(true);
-  } catch(error) {
-    errorEl.textContent = error.message;
-    errorEl.style.display = 'block';
-    button.disabled = false;
-    button.textContent = profileAuthConfigured ? 'UNLOCK PROFILE' : 'CREATE PASSWORD';
-  }
-}
-
-async function logoutProfile() {
-  await fetch('/api/auth?profileId=' + encodeURIComponent(PROFILE_ID), {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action:'logout', profileId:PROFILE_ID }),
-  }).catch(()=>{});
-  location.reload();
-}
 
 function serializeState(updatedAt) {
   return {
@@ -541,10 +425,6 @@ function loadLocalState() {
 async function loadSharedState() {
   try {
     const res = await fetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store', credentials:'same-origin' });
-    if(res.status === 401) {
-      await ensureProfileAccess(true);
-      return loadSharedState();
-    }
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
@@ -724,15 +604,6 @@ async function refreshPrices() {
 
 // Auto refresh every 60 seconds
 async function init() {
-  try {
-    await ensureProfileAccess();
-  } catch(error) {
-    showProfileLock(true);
-    const errorEl = document.getElementById('profile-lock-error');
-    errorEl.textContent = error.message;
-    errorEl.style.display = 'block';
-    return;
-  }
   await loadState();
   await fetchStockList();
   if (state.selected && !state.stocks[state.selected]) state.selected = null;
