@@ -3,6 +3,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const { QUOTE_SYMBOLS, STOCKS } = require('./_stockUniverse');
 const { fetchGoldpetalAuthorizedQuote } = require('./_goldpetalFeed');
+const { cleanProfileId } = require('./_profileAuth');
 
 const KEY_PREFIX = 'td:shared-state';
 const EQUITY_LEVERAGE = 5;
@@ -31,11 +32,6 @@ const DEFAULT_STATE: any = {
   scannerLastRun: 0,
   updatedAt: 0,
 };
-
-function cleanProfileId(value: any) {
-  const id = String(value || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
-  return id || 'default';
-}
 
 function getStateKey(profileId: any) {
   return `${KEY_PREFIX}:${cleanProfileId(profileId)}`;
@@ -402,10 +398,11 @@ function getScanSlice(symbols: string[], cursor: number) {
 }
 
 module.exports = async (req: any, res: any) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-store');
 
   const profileId = cleanProfileId(req?.query?.profileId || req?.query?.accountId);
+  const cronSecret = process.env.CRON_SECRET;
+  const isTrustedCron = Boolean(cronSecret) && req?.headers?.authorization === `Bearer ${cronSecret}`;
   const state = await readState(profileId);
   if (!state.scannerOn) {
     res.json({ ok: true, scannerOn: false, message: 'Scanner is OFF, no action taken' });
