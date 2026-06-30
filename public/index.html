@@ -2760,6 +2760,22 @@ function getEmaTrendAlignment(current100, previous100, current200, previous200, 
   return { bullish, bearish, sameDirection: bullish || bearish, separated: true };
 }
 
+// ── VWAP ─────────────────────────────────────────────────────────────────────
+function _vwap(candles) {
+  // candles = [{open,high,low,close,volume}]
+  // Use only today's candles (last trading session)
+  if(!candles||!candles.length) return null;
+  let sumPV=0, sumV=0;
+  const session = candles.slice(-78); // ~6.5h of 5m candles = 1 trading day
+  for(const c of session) {
+    const tp = (c.high + c.low + c.close) / 3;
+    const vol = c.volume || 1;
+    sumPV += tp * vol;
+    sumV  += vol;
+  }
+  return sumV > 0 ? sumPV / sumV : null;
+}
+
 async function primeScanner() {
   const syms = Object.keys(state.stocks);
   let done = 0;
@@ -2767,11 +2783,22 @@ async function primeScanner() {
     const batch = syms.slice(i,i+3);
     await Promise.all(batch.map(async sym=>{
       try {
-        const r=await fetch(`/api/history?symbol=${sym}&interval=5m&range=5d`);
-        if(!r.ok) return;
-        const data=await r.json();
-        if(data.candles&&data.candles.length>10)
-          state.stocks[sym].scanHistory=data.candles.map(c=>c.close).filter(Boolean);
+        // Fetch 5m candles (full OHLCV for VWAP + closes for EMA)
+        const r5=await fetch(`/api/history?symbol=${sym}&interval=5m&range=5d`);
+        if(r5.ok) {
+          const d5=await r5.json();
+          if(d5.candles&&d5.candles.length>10) {
+            state.stocks[sym].scanCandles5m = d5.candles; // full candles
+            state.stocks[sym].scanHistory   = d5.candles.map(c=>c.close).filter(Boolean);
+          }
+        }
+        // Fetch 15m candles for Stage 3 EMA resistance check
+        const r15=await fetch(`/api/history?symbol=${sym}&interval=15m&range=5d`);
+        if(r15.ok) {
+          const d15=await r15.json();
+          if(d15.candles&&d15.candles.length>10)
+            state.stocks[sym].scanHistory15m = d15.candles.map(c=>c.close).filter(Boolean);
+        }
       } catch(e){}
       done++;
     }));
@@ -2801,62 +2828,97 @@ function runScanner() {
     notify(`\ud83e\udd16 AUTO EXIT ${h.symbol} \u2014 ${hitTarget?'\u2705 TARGET HIT':'\u274c SL HIT'} | P&L: ${pnl>=0?'+':''}₹${fn(pnl)}`, hitTarget?'success':'error');
     updateHeader(); save(); updateBadges();
   });
-  // Scan for new crossovers
+  // ── 4-STAGE SCAN ─────────────────────────────────────────────────────────
   Object.values(state.stocks).forEach(s=>{
-    const closes=s.scanHistory;
+    const closes   = s.scanHistory;
+    const candles5 = s.scanCandles5m || [];
+    const closes15 = s.scanHistory15m || [];
     if(!closes||closes.length<55) return;
+
+    // STAGE 1: EMA20 x EMA50 crossover on 5m
     const e20=_ema(closes,20), e50=_ema(closes,50);
     const p20=_prevEma(closes,20), p50=_prevEma(closes,50);
     if(!e20||!e50||!p20||!p50) return;
     const bullCross=p20<=p50&&e20>e50, bearCross=p20>=p50&&e20<e50;
     if(!bullCross&&!bearCross) return;
-    // ── GAP CHECK: Reject if EMA20 & EMA50 have large gap (price will retrace to fill it) ──
-    const gapPct = Math.abs(e20 - e50) / Math.max(e50, 1) * 100;
-    const MAX_GAP = 0.5; // Max 0.5% gap allowed
-    if(gapPct > MAX_GAP) return;
-    // EMA100 & EMA200 must move in the same direction and stay separated.
-    const e100=_ema(closes,100), e200=_ema(closes,200);
+    const stage1=true;
+
     const dir=bullCross?'BUY':'SELL';
     const entry=s.price||closes[closes.length-1]; if(!entry||entry<=0) return;
+
+    // STAGE 2: VWAP inline + Pivot Break
+    const vwap = candles5.length ? _vwap(candles5) : null;
+    const vwapOk = vwap == null
+      ? true
+      : bullCross ? entry >= vwap * 0.998 : entry <= vwap * 1.002;
     const { pivotHigh, pivotLow } = getScannerPivotLevels(closes);
-    const pivotConfirmed = bullCross ? entry > pivotHigh : entry < pivotLow;
-    if(!pivotConfirmed) return;
+    const pivotBreak = bullCross ? entry > pivotHigh : entry < pivotLow;
+    const stage2 = vwapOk && pivotBreak;
+
+    // STAGE 3: 15m chart - no EMA acting as resistance overhead
+    let stage3 = true;
+    if(closes15.length >= 55) {
+      const e20_15=_ema(closes15,20), e50_15=_ema(closes15,50);
+      if(e20_15&&e50_15) {
+        stage3 = bullCross
+          ? entry > Math.max(e20_15,e50_15)*0.999
+          : entry < Math.min(e20_15,e50_15)*1.001;
+      }
+    }
+
+    // STAGE 4: Tight candles + small EMA gap (fresh crossover, not chasing)
+    const gapPct = Math.abs(e20-e50)/Math.max(e50,1)*100;
+    const tightCross = gapPct < 0.4;
+    const recent5 = candles5.slice(-5);
+    const avgBody = recent5.length
+      ? recent5.reduce((sum,c)=>sum+Math.abs((c.close||0)-(c.open||0)),0)/recent5.length : 0;
+    const avgRange = recent5.length
+      ? recent5.reduce((sum,c)=>sum+((c.high||0)-(c.low||0)),0)/recent5.length : 0;
+    const tightCandles = avgRange>0 ? (avgBody/avgRange)<0.65 : true;
+    const stage4 = tightCross && tightCandles;
+
+    // ALL 4 STAGES MUST PASS to take a trade
+    const allPass = stage1 && stage2 && stage3 && stage4;
+    const stageLabel='S1:'+(stage1?'OK':'--')+' S2:'+(stage2?'OK':'--')+' S3:'+(stage3?'OK':'--')+' S4:'+(stage4?'OK':'--');
+
     const key=`${s.symbol}_${dir}_${Math.round(e20)}_${Math.round(e50)}_${Math.round(pivotHigh)}_${Math.round(pivotLow)}`;
     if(state.scannerTraded[key]) return;
-    const p100=_prevEma(closes,100), p200=_prevEma(closes,200);
-    const alignment = getEmaTrendAlignment(e100, p100, e200, p200, entry);
-    const confirmed = bullCross ? alignment.bullish : alignment.bearish;
+
     const recent=closes.slice(-5);
     const slPrice=bullCross?Math.min(...recent)*0.9995:Math.max(...recent)*1.0005;
     const riskPer=Math.abs(entry-slPrice); if(riskPer<=0) return;
     const qty=Math.max(1,Math.floor(state.scannerRisk/riskPer));
     const target=bullCross?entry+riskPer:entry-riskPer;
-    const emaNote = e100&&e200 ? ` | EMA100/200 ${confirmed ? (bullCross ? 'rising' : 'falling') : 'mixed'}` : '';
+
     const sig={
       id:Date.now()+Math.random(), sym:s.symbol, dir,
       entry:parseFloat(entry.toFixed(2)), sl:parseFloat(slPrice.toFixed(2)),
       target:parseFloat(target.toFixed(2)), qty, rr:'1:1',
       time:new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
-      status:'SIGNAL', pnl:null, confirmed, pivotConfirmed
+      status:'SIGNAL', pnl:null,
+      stages:{s1:stage1,s2:stage2,s3:stage3,s4:stage4}, stageLabel,
+      vwap:vwap?parseFloat(vwap.toFixed(2)):null, gapPct:parseFloat(gapPct.toFixed(3))
     };
-    if(!confirmed) {
+
+    if(!allPass) {
       state.scannerTraded[key]=true;
-      sig.status='SKIPPED (EMA100/200 not aligned)';
+      sig.status='FILTERED ('+stageLabel+')';
     } else if(bullCross) {
       const total=entry*qty;
-      const marginRequired = total / EQUITY_LEVERAGE;
+      const marginRequired=total/EQUITY_LEVERAGE;
       if(marginRequired<=state.cash){
         state.scannerTraded[key]=true;
         state.cash-=marginRequired;
         addHolding({symbol:s.symbol,type:'EQUITY',qty,avgPrice:entry,sl:slPrice,target,marginUsed:marginRequired,leverage:EQUITY_LEVERAGE});
         addOrder({symbol:s.symbol,side:'BUY',qty,price:entry,total,charges:0,realizedPnl:0,
-          desc:`\ud83e\udd16 AUTO EMA20\u00d750\u2191${emaNote} · ${EQUITY_LEVERAGE}x · Margin ₹${fn(marginRequired)} · SL:\u20b9${fn(slPrice)} T:\u20b9${fn(target)}`});
+          desc:'🤖 AUTO ['+stageLabel+'] · '+EQUITY_LEVERAGE+'x · Margin ₹'+fn(marginRequired)+' · SL:₹'+fn(slPrice)+' T:₹'+fn(target)});
         sig.status='EXECUTED';
-        notify(`\ud83e\udd16 AUTO BUY ${s.symbol} \u00d7${qty} @\u20b9${fn(entry)} | Margin ₹${fn(marginRequired)} | SL:\u20b9${fn(slPrice)} | Target:\u20b9${fn(target)}`,'success');
+        notify('🤖 AUTO BUY '+s.symbol+' ×'+qty+' @₹'+fn(entry)+' | '+stageLabel+' | Margin ₹'+fn(marginRequired),'success');
         updateHeader(); save();
       } else { state.scannerTraded[key]=true; sig.status='SKIPPED (low cash)'; }
     } else {
       state.scannerTraded[key]=true;
+      sig.status='SIGNAL SELL ['+stageLabel+']';
     }
     state.scannerLog.unshift(sig);
     if(state.scannerLog.length>50) state.scannerLog.pop();
@@ -2864,7 +2926,6 @@ function runScanner() {
   });
   if(state.tab==='scanner') renderScanner();
 }
-
 function toggleScanner() {
   state.scannerOn=!state.scannerOn; save();
   if(state.scannerOn){
@@ -2914,7 +2975,15 @@ function renderScanner() {
   }).join('');
 
   const logRows=state.scannerLog.map(sig=>{
-    const cls=sig.status==='EXECUTED'?'sig-executed':sig.status.includes('TARGET')?'sig-target':sig.status.includes('SL')?'sig-sl':sig.status.includes('SKIPPED')?'sig-skipped':'sig-signal';
+    const cls=sig.status==='EXECUTED'?'sig-executed':sig.status.includes('TARGET')?'sig-target':sig.status.includes('SL')?'sig-sl':sig.status.includes('FILTERED')?'sig-skipped':sig.status.includes('SKIPPED')?'sig-skipped':'sig-signal';
+    const st=sig.stages||{};
+    const stageDots=sig.stageLabel
+      ? `<div style="font-size:9px;margin-top:2px;letter-spacing:0.5px;">
+           <span style="color:${st.s1?'#00e676':'#ff4444'};">S1</span>
+           <span style="color:${st.s2?'#00e676':'#ff4444'};margin-left:3px;">S2</span>
+           <span style="color:${st.s3?'#00e676':'#ff4444'};margin-left:3px;">S3</span>
+           <span style="color:${st.s4?'#00e676':'#ff4444'};margin-left:3px;">S4</span>
+         </div>` : '';
     return `<tr style="border-top:1px solid var(--border);">
       <td style="padding:8px;color:var(--muted);font-size:10px;">${sig.time}</td>
       <td style="padding:8px;font-weight:700;color:var(--amber);cursor:pointer;" onclick="selectStock('${sig.sym}')">${sig.sym}</td>
@@ -2923,7 +2992,7 @@ function renderScanner() {
       <td style="padding:8px;text-align:center;color:#ff4444;">\u20b9${fn(sig.sl)}</td>
       <td style="padding:8px;text-align:center;color:#00e676;">\u20b9${fn(sig.target)}</td>
       <td style="padding:8px;text-align:center;">${sig.qty}</td>
-      <td style="padding:8px;text-align:center;"><span class="sig-badge ${cls}">${sig.status}</span></td>
+      <td style="padding:8px;text-align:center;"><span class="sig-badge ${cls}">${sig.status==='EXECUTED'?'EXECUTED':sig.status.includes('TARGET')?sig.status:sig.status.includes('SL')?sig.status:sig.status.includes('FILTERED')?'FILTERED':sig.status}</span>${stageDots}</td>
       <td style="padding:8px;text-align:center;color:${sig.pnl==null?'var(--muted)':sig.pnl>=0?'#00e676':'#ff4444'};font-weight:700;">${sig.pnl==null?'\u2014':(sig.pnl>=0?'+':'')+'\u20b9'+fn(sig.pnl)}</td>
     </tr>`;
   }).join('');
@@ -2960,24 +3029,25 @@ function renderScanner() {
               onchange="state.scannerRisk=parseFloat(this.value)||5000;save()"/>
           </div>
           <div class="form-group">
-            <div class="form-label">Entry Signal</div>
-            <input class="form-input" value="EMA20 crosses above EMA50 on 5m chart" readonly style="color:var(--amber);"/>
+            <div class="form-label">Entry Logic</div>
+            <input class="form-input" value="4-Stage filter — all stages must pass" readonly style="color:var(--amber);"/>
           </div>
           <div class="form-group">
             <div class="form-label">SL / Target</div>
-            <input class="form-input" value="SL = recent 5-candle low &nbsp;|\u00a0Target = Entry + (Entry \u2212 SL)" readonly style="color:#00e676;"/>
+            <input class="form-input" value="SL = recent 5-candle low · Target = 1:1 RR" readonly style="color:#00e676;"/>
           </div>
         </div>
-        <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.8;background:var(--bg3);padding:10px 14px;border-radius:4px;">
-          <b style="color:var(--amber2);">\u25b2 BUY (AUTO EXECUTE):</b> EMA20 crosses above EMA50 <b>AND EMA100 + EMA200 are both rising with a visible gap</b> \u2192 Buy with qty = Risk\u00f7(Entry\u2212SL), 5x leverage margin, SL at 5-candle low, Target at 1:1 RR<br>
-          <b style="color:var(--amber2);">\u26a0 FILTERED:</b> EMA20\u00d7EMA50 crossover detected but EMA100/200 are mixed, flat, or overlapping \u2192 logged as SKIPPED, no trade<br>
-          <b style="color:var(--amber2);">\u25bc SELL (SIGNAL ONLY):</b> EMA20 crosses below EMA50 with EMA100 + EMA200 both falling \u2192 Shown in log, no short in paper mode<br>
-          <b style="color:var(--amber2);">\u26a1 AUTO EXIT:</b> Position closes automatically when price hits SL or Target<br>
-          <b style="color:var(--amber2);">SERVER MODE:</b> When deployed on Vercel, cron keeps scanning in batches even if this page is closed.
+        <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.9;background:var(--bg3);padding:10px 14px;border-radius:4px;">
+          <b style="color:#00e676;">S1 — EMA Crossover (5m):</b> EMA20 crosses above EMA50 on the 5-minute chart<br>
+          <b style="color:#00e676;">S2 — VWAP + Pivot Break:</b> Price is at or above VWAP AND has broken above the recent pivot high<br>
+          <b style="color:#00e676;">S3 — No EMA Resistance (15m):</b> On the 15-minute chart, price is above both EMA20 and EMA50 — no EMA blocking from above<br>
+          <b style="color:#00e676;">S4 — Tight Candles + Fresh Cross:</b> EMA gap &lt; 0.4% (fresh, not chasing) AND recent candles are small-bodied (consolidation)<br>
+          <b style="color:var(--amber2);">FILTERED:</b> Any stage fails — logged with S1/S2/S3/S4 breakdown (green=pass, red=fail), no trade taken<br>
+          <b style="color:var(--amber2);">AUTO EXIT:</b> Position closes automatically when price hits SL or Target
         </div>
       </div>
 
-      <!-- Active positions -->
+      <!-- Active positions -->      <!-- Active positions -->
       ${activeTrades>0?`
       <div class="trade-panel" style="margin-bottom:20px;border-color:rgba(0,230,118,0.3);">
         <div class="trade-title" style="color:#00e676;">\u26a1 ACTIVE AUTO POSITIONS (${activeTrades})</div>
