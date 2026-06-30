@@ -315,8 +315,7 @@ canvas{width:100%;height:100px;}
   <div id="main">
     <div class="tabs">
       <button class="tab-btn" data-tab="pnl" onclick="setTab('pnl',this)">P&L</button>
-      <button class="tab-btn" data-tab="scanner" onclick="setTab('scanner',this)">🤖 Auto Scan</button>
-      <button class="tab-btn active" data-tab="market" onclick="setTab('market',this)">Market Watch</button>
+      <button class="tab-btn active" data-tab="scanner" onclick="setTab('scanner',this)">🤖 Auto Scan</button>
       <button class="tab-btn" data-tab="chart" onclick="setTab('chart',this)">📈 Chart</button>
       <button class="tab-btn" data-tab="options" onclick="setTab('options',this)">F&O Options</button>
       <button class="tab-btn" data-tab="portfolio" onclick="setTab('portfolio',this)">Portfolio <span class="tab-badge" id="badge-portfolio">0</span></button>
@@ -337,7 +336,7 @@ let state = {
   portfolio: {},
   orders: [],
   selected: null,
-  tab: 'market',
+  tab: 'scanner',
   tradeType: 'BUY',
   optionsData: null,
   selectedExpiry: null,
