@@ -327,6 +327,7 @@ canvas{width:100%;height:100px;}
   </div>
 </div>
 
+<script src="./config.js"></script>
 <script>
 // ── STOCK DATA ──────────────────────────────────────────────────────────
 // ── STATE ────────────────────────────────────────────────────────────────
@@ -374,6 +375,20 @@ function getProfileId() {
 
 const PROFILE_ID = getProfileId();
 const LOCAL_STATE_KEY = `td_state_${PROFILE_ID}`;
+const API_BASE = (() => {
+  const configured = window.TRADEDESK_CONFIG?.apiBase || '';
+  return configured.replace(/\/$/, '');
+})();
+
+function apiUrl(path) {
+  if (/^https?:\/\//i.test(path)) return path;
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return API_BASE ? `${API_BASE}${normalized}` : normalized;
+}
+
+function apiFetch(path, init) {
+  return fetch(apiUrl(path), init);
+}
 
 function serializeState(updatedAt) {
   return {
@@ -423,7 +438,7 @@ function loadLocalState() {
 
 async function loadSharedState() {
   try {
-    const res = await fetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store', credentials:'same-origin' });
+    const res = await apiFetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
@@ -433,9 +448,8 @@ async function loadSharedState() {
 
 async function pushSharedState(payload) {
   try {
-    const res = await fetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), {
+    const res = await apiFetch('/api/state?profileId=' + encodeURIComponent(PROFILE_ID), {
       method: 'POST',
-      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...payload, profileId: PROFILE_ID }),
     });
@@ -520,13 +534,13 @@ function updateOptionPremiums(){
 // ── FETCH REAL DATA FROM VERCEL API ──────────────────────────────────────
 async function fetchStockList() {
   try {
-    const res = await fetch('/api/stocks');
+    const res = await apiFetch('/api/stocks');
     if(!res.ok) throw new Error('API error');
     const stocks = await res.json();
     stocks.forEach(s => {
       state.stocks[s.symbol] = {
         symbol: s.symbol, name: s.name, sector: s.sector,
-        price: 0, basePrice: 0, change: 0, changePct: 0,
+        price: s.defaultPrice || 0, basePrice: s.defaultPrice || 0, change: 0, changePct: 0,
         open: 0, high: 0, low: 0, volume: 0,
         week52High: 0, week52Low: 0, marketCap: 0,
         defaultPrice: s.defaultPrice || 0,
@@ -555,25 +569,26 @@ async function refreshPrices() {
     for(let i=0;i<symbols.length;i+=50) batches.push(symbols.slice(i,i+50));
 
     await Promise.all(batches.map(async batch => {
-      const res = await fetch('/api/quotes?symbols=' + batch.join(','));
+      const res = await apiFetch('/api/quotes?symbols=' + batch.join(','));
       if(!res.ok) return;
       const data = await res.json();
       Object.entries(data).forEach(([sym, q]) => {
         if(!state.stocks[sym]) return;
         const s = state.stocks[sym];
+        if(!q.price || q.price <= 0) return;
         const prev = s.price || q.price;
         s.price = q.price;
         s.basePrice = s.basePrice || q.price;
         s.change = q.change;
         s.changePct = q.changePct;
-        s.open = q.open; s.high = q.high; s.low = q.low;
+        s.open = q.open || s.open; s.high = q.high || s.high; s.low = q.low || s.low;
         s.volume = q.volume;
-        s.week52High = q.week52High;
-        s.week52Low = q.week52Low;
-        s.marketCap = q.marketCap;
+        s.week52High = q.week52High || s.week52High;
+        s.week52Low = q.week52Low || s.week52Low;
+        s.marketCap = q.marketCap || s.marketCap;
         s.quoteSource = q.source || 'exchange';
         s.feedTime = q.feedTime || null;
-        if(q.price > 0) s.history.push(q.price);
+        s.history.push(q.price);
         if(s.history.length > 200) s.history.shift();
         // Feed live price into scanHistory so scanner detects crossovers in real-time
         if(state.scannerOn && q.price > 0) {
@@ -934,7 +949,7 @@ async function fetchAIAdvisor(sym) {
       state: serializeState(), // Include trade history for learning
     };
 
-    const response = await fetch('/api/ai-advisor', {
+    const response = await apiFetch('/api/ai-advisor', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1161,9 +1176,9 @@ async function fetchAndDrawChart(sym) {
 
   let rawCandles = null;
 
-  // Fetch from /api/history — works on Vercel and local Node.js
+  // Fetch from the configured API origin.
   try {
-    const res = await fetch(`/api/history?symbol=${sym}&range=${range}&interval=${interval}`, {signal: AbortSignal.timeout(8000)});
+    const res = await apiFetch(`/api/history?symbol=${sym}&range=${range}&interval=${interval}`, {signal: AbortSignal.timeout(8000)});
     if(res.ok) {
       const data = await res.json();
       if(data.candles && data.candles.length > 3) {
@@ -1212,7 +1227,7 @@ async function loadMoreHistory() {
   const period1 = period2 - (maxDays * 86400);
 
   try {
-    const res = await fetch(`/api/history?symbol=${sym}&interval=${interval}&period1=${period1}&period2=${period2}`, {signal: AbortSignal.timeout(10000)});
+    const res = await apiFetch(`/api/history?symbol=${sym}&interval=${interval}&period1=${period1}&period2=${period2}`, {signal: AbortSignal.timeout(10000)});
     if(res.ok) {
       const data = await res.json();
       if(data.candles && data.candles.length > 3) {
@@ -2784,7 +2799,7 @@ async function primeScanner() {
     await Promise.all(batch.map(async sym=>{
       try {
         // Fetch 5m candles (full OHLCV for VWAP + closes for EMA)
-        const r5=await fetch(`/api/history?symbol=${sym}&interval=5m&range=5d`);
+        const r5=await apiFetch(`/api/history?symbol=${sym}&interval=5m&range=5d`);
         if(r5.ok) {
           const d5=await r5.json();
           if(d5.candles&&d5.candles.length>10) {
@@ -2793,7 +2808,7 @@ async function primeScanner() {
           }
         }
         // Fetch 15m candles for Stage 3 EMA resistance check
-        const r15=await fetch(`/api/history?symbol=${sym}&interval=15m&range=5d`);
+        const r15=await apiFetch(`/api/history?symbol=${sym}&interval=15m&range=5d`);
         if(r15.ok) {
           const d15=await r15.json();
           if(d15.candles&&d15.candles.length>10)
@@ -2930,7 +2945,7 @@ function toggleScanner() {
   state.scannerOn=!state.scannerOn; save();
   if(state.scannerOn){
     Object.keys(state.stocks).forEach(sym=>{ if(!state.stocks[sym].scanHistory) state.stocks[sym].scanHistory=[]; });
-    setTimeout(() => fetch('/api/cron-scanner?manual=1&profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store' }).catch(()=>{}), 1200);
+    setTimeout(() => apiFetch('/api/cron-scanner?manual=1&profileId=' + encodeURIComponent(PROFILE_ID), { cache: 'no-store' }).catch(()=>{}), 1200);
     notify('\ud83e\udd16 Auto Scanner ON — browser + server scanner started','success');
     primeScanner().then(()=>{
       notify('\ud83e\udd16 Scanner ready — watching for EMA20\u00d7EMA50 crossovers','success');
