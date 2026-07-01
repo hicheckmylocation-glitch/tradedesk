@@ -19,7 +19,7 @@ function fetchBatchV7(yahooSyms) {
       'regularMarketOpen','regularMarketVolume',
       'fiftyTwoWeekHigh','fiftyTwoWeekLow','marketCap',
     ].join(',');
-    const path = `/v7/finance/quote?symbols=${encodeURIComponent(yahooSyms.join(','))}&fields=${encodeURIComponent(fields)}&formatted=false&lang=en&region=IN`;
+    const path = `/v7/finance/quote?symbols=${yahooSyms.map(s => encodeURIComponent(s)).join(',')}&fields=${fields}&formatted=false&lang=en&region=IN`;
     const req = https.get(
       {
         hostname: "query2.finance.yahoo.com",
